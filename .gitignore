@@ -1,0 +1,26 @@
+# Rust
+/target
+Cargo.lock
+
+# Node / JS
+node_modules
+dist
+.env
+pnpm-lock.yaml
+
+# Tauri
+src-tauri/target
+src-tauri/gen
+
+# IDEs
+.idea
+.vscode
+*.sublime-project
+*.sublime-workspace
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Oxide specific
+docs/temp_*
