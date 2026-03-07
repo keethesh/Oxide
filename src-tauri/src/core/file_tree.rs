@@ -1,0 +1,273 @@
+use super::arena::StringArena;
+use super::file_entry::{FileEntry, FileFlags};
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct NodeSummary {
+    pub id: u32,
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub child_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FileRow {
+    pub id: u32,
+    pub name: String,
+    pub size: u64,
+    pub path: String,
+    pub parent_id: u32,
+}
+
+#[derive(Default, Serialize)]
+pub struct FileTree {
+    pub entries: Vec<FileEntry>,
+    pub names: StringArena,
+    pub largest_files: Vec<u32>,
+}
+
+impl FileTree {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::with_capacity(1_000_000),
+            names: StringArena::new(),
+            largest_files: Vec::new(),
+        }
+    }
+
+    pub fn with_root(root_name: &str) -> Self {
+        let mut tree = Self::new();
+        let (name_offset, name_len) = tree.names.push(root_name);
+        tree.entries.push(FileEntry {
+            size: 0,
+            parent_index: FileEntry::NULL_INDEX,
+            first_child_index: FileEntry::NULL_INDEX,
+            next_sibling_index: FileEntry::NULL_INDEX,
+            name_offset,
+            name_len,
+            flags: FileFlags::Directory as u16,
+        });
+        tree
+    }
+
+    pub fn root_id(&self) -> u32 {
+        0
+    }
+
+    pub fn add_entry(&mut self, entry: FileEntry) -> u32 {
+        let index = self.entries.len() as u32;
+        self.entries.push(entry);
+        index
+    }
+
+    pub fn attach_child(&mut self, parent_index: u32, child_index: u32) {
+        if parent_index as usize >= self.entries.len() || child_index as usize >= self.entries.len()
+        {
+            return;
+        }
+
+        self.entries[child_index as usize].parent_index = parent_index;
+        let old_first_child = self.entries[parent_index as usize].first_child_index;
+        self.entries[child_index as usize].next_sibling_index = old_first_child;
+        self.entries[parent_index as usize].first_child_index = child_index;
+    }
+
+    pub fn child_count(&self, id: u32) -> u32 {
+        if id as usize >= self.entries.len() {
+            return 0;
+        }
+
+        let mut count = 0;
+        let mut child = self.entries[id as usize].first_child_index;
+        while child != FileEntry::NULL_INDEX {
+            count += 1;
+            child = self.entries[child as usize].next_sibling_index;
+        }
+        count
+    }
+
+    pub fn aggregate_sizes(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        self.calculate_node_size(self.root_id());
+    }
+
+    fn calculate_node_size(&mut self, index: u32) -> u64 {
+        let entry = self.entries[index as usize];
+        if !entry.is_dir() {
+            return entry.size;
+        }
+
+        let mut total: u64 = 0;
+        let mut child_idx = entry.first_child_index;
+
+        while child_idx != FileEntry::NULL_INDEX {
+            total = total.saturating_add(self.calculate_node_size(child_idx));
+            child_idx = self.entries[child_idx as usize].next_sibling_index;
+        }
+
+        self.entries[index as usize].size = total;
+        total
+    }
+
+    pub fn rebuild_largest_files(&mut self) {
+        let mut largest_files = Vec::new();
+        for (index, entry) in self.entries.iter().enumerate() {
+            if index != self.root_id() as usize && !entry.is_dir() && entry.size > 0 {
+                largest_files.push(index as u32);
+            }
+        }
+
+        largest_files.sort_by(|a, b| {
+            self.entries[*b as usize]
+                .size
+                .cmp(&self.entries[*a as usize].size)
+                .then_with(|| a.cmp(b))
+        });
+
+        self.largest_files = largest_files;
+    }
+
+    pub fn get_node_name(&self, id: u32) -> String {
+        if id as usize >= self.entries.len() {
+            return String::new();
+        }
+
+        let entry = &self.entries[id as usize];
+        self.names
+            .get(entry.name_offset, entry.name_len)
+            .to_string()
+    }
+
+    pub fn has_node(&self, id: u32) -> bool {
+        (id as usize) < self.entries.len()
+    }
+
+    pub fn get_children(&self, id: u32) -> Vec<NodeSummary> {
+        if !self.has_node(id) {
+            return Vec::new();
+        }
+
+        let mut children = Vec::new();
+        let mut child_idx = self.entries[id as usize].first_child_index;
+
+        while child_idx != FileEntry::NULL_INDEX {
+            let entry = &self.entries[child_idx as usize];
+            children.push(NodeSummary {
+                id: child_idx,
+                name: self.display_name(child_idx),
+                is_dir: entry.is_dir(),
+                size: entry.size,
+                child_count: self.child_count(child_idx),
+            });
+            child_idx = entry.next_sibling_index;
+        }
+
+        children.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| b.size.cmp(&a.size))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        children
+    }
+
+    pub fn get_file_path(&self, id: u32) -> Vec<(u32, String)> {
+        let mut path = Vec::new();
+        let mut current = id;
+
+        while current != FileEntry::NULL_INDEX && (current as usize) < self.entries.len() {
+            let name = self.display_name(current);
+            if current == self.root_id() || (!name.is_empty() && name != "\\") {
+                path.push((current, name));
+            }
+            current = self.entries[current as usize].parent_index;
+        }
+
+        path.reverse();
+        path
+    }
+
+    pub fn get_full_path(&self, id: u32) -> String {
+        let path = self.get_file_path(id);
+        if path.is_empty() {
+            return String::new();
+        }
+
+        let mut full_path = String::new();
+        for (index, (_, part)) in path.iter().enumerate() {
+            if index == 0 {
+                full_path.push_str(part);
+                continue;
+            }
+
+            if !full_path.ends_with('\\') {
+                full_path.push('\\');
+            }
+            full_path.push_str(part);
+        }
+
+        full_path
+    }
+
+    pub fn get_largest_files(&self, root_id: u32, offset: usize, limit: usize) -> Vec<FileRow> {
+        if !self.has_node(root_id) || limit == 0 {
+            return Vec::new();
+        }
+
+        let mut rows = Vec::new();
+        let mut skipped = 0usize;
+
+        for file_id in self.largest_files.iter().copied() {
+            if !self.is_descendant_or_self(file_id, root_id) {
+                continue;
+            }
+
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+
+            let entry = &self.entries[file_id as usize];
+            rows.push(FileRow {
+                id: file_id,
+                name: self.display_name(file_id),
+                size: entry.size,
+                path: self.get_full_path(file_id),
+                parent_id: entry.parent_index,
+            });
+            if rows.len() == limit {
+                break;
+            }
+        }
+
+        rows
+    }
+
+    fn display_name(&self, id: u32) -> String {
+        if id == self.root_id() {
+            return self.get_node_name(id).trim_end_matches('\\').to_string();
+        }
+
+        let name = self.get_node_name(id);
+        if name.is_empty() || name == "." {
+            "\\".to_string()
+        } else {
+            name
+        }
+    }
+
+    fn is_descendant_or_self(&self, id: u32, root_id: u32) -> bool {
+        let mut current = id;
+        while current != FileEntry::NULL_INDEX && (current as usize) < self.entries.len() {
+            if current == root_id {
+                return true;
+            }
+            current = self.entries[current as usize].parent_index;
+        }
+        false
+    }
+}

@@ -1,0 +1,51 @@
+    Checking oxide v0.1.0 (C:\Users\keeth\WebstormProjects\Oxide\src-tauri)
+warning: unused variable: `mft_bytes`
+  --> src\lib.rs:29:9
+   |
+29 |     let mft_bytes = reader::read_initial_mft_bytes(&volume)
+   |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mft_bytes`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+error: future cannot be sent between threads safely
+   --> src\lib.rs:13:1
+    |
+13  | #[tauri::command]
+    | ^^^^^^^^^^^^^^^^^ future returned by `scan_drive` is not `Send`
+...
+78  |         .invoke_handler(tauri::generate_handler![scan_drive, get_treemap_layout])
+    |                         -------------------------------------------------------- in this macro invocation
+    |
+    = help: within `impl Future<Output = Result<std::string::String, std::string::String>>`, the trait `Send` is not implemented for `*mut c_void`
+note: future is not `Send` as this value is used across an await
+   --> src\lib.rs:37:67
+    |
+22  |     let volume = volume::open_volume(drive)
+    |         ------ has type `VolumeHandle` which is not `Send`
+...
+37  |         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    |                                                                   ^^^^^ await occurs here, with `volume` maybe used later
+note: required by a bound in `ResultFutureTag::future`
+   --> C:\Users\keeth\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-2.10.2\src\ipc\command.rs:314:42
+    |
+310 |     pub async fn future<T, E, F>(self, value: F) -> Result<InvokeResponseBody, InvokeError>
+    |                  ------ required by a bound in this associated function
+...
+314 |       F: Future<Output = Result<T, E>> + Send,
+    |                                          ^^^^ required by this bound in `ResultFutureTag::future`
+    = note: this error originates in the macro `__cmd__scan_drive` which comes from the expansion of the macro `tauri::generate_handler` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `id`
+  --> src\treemap\layout.rs:54:26
+   |
+54 |         while let Some(&(id, area)) = items.first() {
+   |                          ^^ help: if this is intentional, prefix it with an underscore: `_id`
+
+warning: unused variable: `root_id`
+  --> src\lib.rs:50:23
+   |
+50 | fn get_treemap_layout(root_id: u32, width: f32, height: f32) -> Vec<LayoutRect> {
+   |                       ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_root_id`
+
+warning: `oxide` (lib) generated 3 warnings
+error: could not compile `oxide` (lib) due to 2 previous errors; 3 warnings emitted

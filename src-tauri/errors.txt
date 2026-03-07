@@ -1,0 +1,70 @@
+    Checking oxide v0.1.0 (C:\Users\keeth\WebstormProjects\Oxide\src-tauri)
+error[E0432]: unresolved import `windows::Win32::Storage::FileSystem::FILE_Attribute_NORMAL`
+ --> src\mft\volume.rs:7:18
+  |
+7 |     CreateFileW, FILE_Attribute_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+  |                  ^^^^^^^^^^^^^^^^^^^^^
+  |                  |
+  |                  no `FILE_Attribute_NORMAL` in `Win32::Storage::FileSystem`
+  |                  help: a similar name exists in the module: `FILE_ATTRIBUTE_NORMAL`
+
+error[E0432]: unresolved import `windows::Win32::System::Ioctl`
+  --> src\mft\volume.rs:9:29
+   |
+9  | use windows::Win32::System::Ioctl::{FSCTL_GET_NTFS_VOLUME_DATA, NTFS_VOLUME_DATA_BUFFER};
+   |                             ^^^^^ could not find `Ioctl` in `System`
+   |
+note: found an item that was configured out
+  --> C:\Users\keeth\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-0.62.2\src\Windows\Win32\System\mod.rs:60:9
+   |
+60 | pub mod Ioctl;
+   |         ^^^^^
+note: the item is gated behind the `Win32_System_Ioctl` feature
+  --> C:\Users\keeth\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-0.62.2\src\Windows\Win32\System\mod.rs:59:7
+   |
+59 | #[cfg(feature = "Win32_System_Ioctl")]
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::ptr`
+ --> src\mft\volume.rs:3:5
+  |
+3 | use std::ptr;
+  |     ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `windows::Win32::Foundation::HANDLE`
+ --> src\mft\reader.rs:5:5
+  |
+5 | use windows::Win32::Foundation::HANDLE;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no function or associated item named `from_win32` found for struct `windows_result::error::Error` in the current scope
+   --> src\mft\volume.rs:46:46
+    |
+46  |             return Err(windows::core::Error::from_win32());
+    |                                              ^^^^^^^^^^ function or associated item not found in `Error`
+    |
+note: if you're trying to build a new `windows_result::error::Error` consider using one of the following associated functions:
+      windows_result::error::Error::empty
+      windows_result::error::Error::new
+      windows_result::error::Error::from_hresult
+      windows_result::error::Error::from_thread
+   --> C:\Users\keeth\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-result-0.4.1\src\error.rs:82:5
+    |
+82  |     pub const fn empty() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+91  |     pub fn new<T: AsRef<str>>(code: HRESULT, message: T) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+110 |     pub fn from_hresult(code: HRESULT) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+118 |     pub fn from_thread() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Some errors have detailed explanations: E0432, E0599.
+For more information about an error, try `rustc --explain E0432`.
+warning: `oxide` (lib) generated 2 warnings
+error: could not compile `oxide` (lib) due to 3 previous errors; 2 warnings emitted

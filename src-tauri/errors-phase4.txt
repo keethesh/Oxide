@@ -1,0 +1,24 @@
+    Checking oxide v0.1.0 (C:\Users\keeth\WebstormProjects\Oxide\src-tauri)
+error[E0433]: failed to resolve: use of undeclared crate or module `tokio`
+  --> src\lib.rs:37:9
+   |
+37 |         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+   |         ^^^^^ use of undeclared crate or module `tokio`
+
+warning: unused variable: `id`
+  --> src\treemap\layout.rs:54:26
+   |
+54 |         while let Some(&(id, area)) = items.first() {
+   |                          ^^ help: if this is intentional, prefix it with an underscore: `_id`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `root_id`
+  --> src\lib.rs:50:23
+   |
+50 | fn get_treemap_layout(root_id: u32, width: f32, height: f32) -> Vec<LayoutRect> {
+   |                       ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_root_id`
+
+For more information about this error, try `rustc --explain E0433`.
+warning: `oxide` (lib) generated 2 warnings
+error: could not compile `oxide` (lib) due to 1 previous error; 2 warnings emitted

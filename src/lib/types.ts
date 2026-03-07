@@ -1,0 +1,64 @@
+export type ScanMode = "mft" | "filesystem";
+
+export type FallbackReason =
+  | "uac_declined"
+  | "mft_probe_timeout"
+  | "mft_read_error"
+  | "mft_parse_error"
+  | "mft_access_denied";
+
+export interface DriveInfo {
+  letter: string;
+  label: string;
+  filesystem: string;
+  supported: boolean;
+}
+
+export interface PrepareScanResult {
+  action: "scan" | "relaunching";
+  mode: ScanMode | null;
+  fallback_reason: FallbackReason | null;
+  pending_drive: string | null;
+}
+
+export interface LaunchScanRequest {
+  drive_letter: string | null;
+}
+
+export interface ScanProgress {
+  files_scanned: number;
+  dirs_scanned: number;
+  bytes_scanned: number;
+  phase: string;
+  done: boolean;
+  scan_mode: ScanMode | null;
+  fallback_reason: FallbackReason | null;
+  duration_ms: number;
+}
+
+export interface ScanResult {
+  root_id: number;
+  drive_letter: string;
+  files_scanned: number;
+  dirs_scanned: number;
+  bytes_scanned: number;
+  scan_mode: ScanMode;
+  fallback_reason: FallbackReason | null;
+  duration_ms: number;
+}
+
+export interface NodeSummary {
+  id: number;
+  name: string;
+  is_dir: boolean;
+  size: number;
+  child_count: number;
+}
+
+export interface FileRow {
+  id: number;
+  name: string;
+  size: number;
+  path: string;
+  parent_id: number;
+}
