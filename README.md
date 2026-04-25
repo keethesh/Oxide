@@ -1,6 +1,22 @@
 # Oxide
 
-Oxide is a Windows-first NTFS disk space analyzer built with Rust, Tauri, Svelte, and TypeScript. It scans a drive by reading NTFS metadata, then presents the results as a treemap, a lazy folder tree, and a largest-files view.
+Oxide is a Windows-first NTFS disk space analyzer built with Rust, Tauri, Svelte, and TypeScript. It scans a drive by reading NTFS metadata directly from the Master File Table, then presents the result as a treemap, a lazy folder tree, and a largest-files view.
+
+The current project goal is straightforward: beat traditional Windows disk analyzers on memory efficiency while staying fast enough to feel immediate on large drives.
+
+## Current Baseline
+
+Latest captured baseline on the maintainer's `C:` volume:
+
+- `mode=Mft`
+- `scan_ms=15081`
+- `aggregate_ms=210`
+- `largest_files_ms=175`
+- `store_ms=13`
+- `total_ms=15480`
+- `358 MB` RAM after scan settled
+
+That run covered `4,041,909` files and `733,450` folders, or `4,775,359` total nodes. Full comparison notes live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## MVP Scope
 
@@ -14,8 +30,6 @@ This repository currently implements an NTFS-only MVP:
 
 Out of scope for this MVP:
 
-- non-NTFS fallback scanning
-- non-admin fallback handling
 - deletion and recycle-bin actions
 - live updates via the USN journal
 - duplicate-file detection
@@ -28,7 +42,15 @@ Out of scope for this MVP:
 - Node.js
 - PNPM
 - Visual Studio C++ Build Tools
-- Administrator access may be required to read the NTFS MFT
+- Administrator access is recommended to read the NTFS MFT at full speed
+
+## What Exists Today
+
+- raw NTFS MFT scanning with a filesystem fallback path
+- packed Rust file-tree storage tuned for multi-million-node scans
+- paged IPC queries for tree nodes and largest files
+- treemap layout caching and canvas rendering
+- benchmark and profiling hooks to track scan, aggregation, and indexing costs
 
 ## Local Development
 
@@ -41,6 +63,8 @@ cargo check
 cd ..
 pnpm tauri dev
 ```
+
+Run the terminal as Administrator if you want the fast MFT scan path on local NTFS volumes.
 
 ## Current Verification
 
@@ -56,3 +80,13 @@ If `cargo test` fails because the machine is low on free disk space, clear space
 ## Benchmarks
 
 Performance baselines and capture rules live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Record scan duration, post-scan memory, scan mode, elevation state, and file/folder counts before comparing against other disk analyzers.
+
+## Documentation
+
+- [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md) explains the current architecture and roadmap.
+- [CONTRIBUTING.md](CONTRIBUTING.md) covers the contribution workflow.
+- [SECURITY.md](SECURITY.md) explains how to report vulnerabilities.
+
+## License
+
+Oxide is licensed under the MIT License. See [LICENSE](LICENSE).

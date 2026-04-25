@@ -5,7 +5,7 @@ use crate::scan::progress::ScanProgress;
 use crate::scan::types::FallbackReason;
 use ntfs::Ntfs;
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{BufReader, ErrorKind, Read};
@@ -20,6 +20,8 @@ use windows::Win32::Storage::FileSystem::{
 
 const PROBE_RECORDS: u32 = 16;
 const CHUNK_RECORDS: u32 = 16_384;
+const PROGRESS_RECORD_INTERVAL: u64 = 262_144;
+const MAX_PREALLOCATED_ENTRIES: usize = 8_000_000;
 const MFT_RECORD_ID: u64 = 0;
 const ROOT_RECORD_ID: u64 = 5;
 const METADATA_RECORD_IDS: [u64; 10] = [0, 1, 2, 3, 4, 6, 7, 8, 9, 10];
@@ -136,11 +138,13 @@ pub fn scan(
         ));
     }
 
-    let mut tree = FileTree::with_root(&root_name);
+    let mut tree = FileTree::with_root_capacity(
+        &root_name,
+        (total_records as usize).min(MAX_PREALLOCATED_ENTRIES),
+    );
     let root_id = tree.root_id();
     let mut mft_to_index = HashMap::new();
-    let mut metadata_record_ids = HashSet::from(METADATA_RECORD_IDS);
-    metadata_record_ids.insert(EXTEND_RECORD_ID);
+    let mut metadata_record_ids = MetadataRecordSet::new(total_records as usize);
     let mut parent_links = Vec::new();
     let mut parsed_records = 0usize;
     let mut mft_stream = mft_data_value.attach(&mut fs);
@@ -149,21 +153,16 @@ pub fn scan(
     mft_to_index.insert(ROOT_RECORD_ID, root_id);
 
     let mut start_record = 0u64;
+    let mut last_progress_record = 0u64;
     while start_record < total_records {
         let remaining = total_records - start_record;
         let records_this_chunk = remaining.min(CHUNK_RECORDS as u64) as usize;
         let chunk_end = start_record + records_this_chunk as u64;
 
-        progress.phase = format!("Reading MFT records {}-{}", start_record + 1, chunk_end);
-        emit_progress(window, progress, started_at);
-
         buffer.resize(records_this_chunk * record_size, 0);
         mft_stream
             .read_exact(&mut buffer)
             .map_err(|err| map_read_error(err, false))?;
-
-        progress.phase = format!("Parsing MFT records {}-{}", start_record + 1, chunk_end);
-        emit_progress(window, progress, started_at);
 
         let parsed_entries: Vec<_> = buffer
             .par_chunks(record_size)
@@ -172,6 +171,9 @@ pub fn scan(
                 || Vec::with_capacity(record_size),
                 |scratch, (offset, record)| {
                     let record_id = start_record + offset as u64;
+                    if is_builtin_metadata_record(record_id) {
+                        return None;
+                    }
                     parser::parse_record_with_scratch(record, record_id, scratch)
                 },
             )
@@ -179,10 +181,6 @@ pub fn scan(
             .collect();
 
         for entry in parsed_entries {
-            if entry.id == ROOT_RECORD_ID {
-                continue;
-            }
-
             if should_skip_mft_entry(&entry, &metadata_record_ids) {
                 metadata_record_ids.insert(entry.id);
                 continue;
@@ -201,7 +199,13 @@ pub fn scan(
             }
         }
 
-        emit_progress(window, progress, started_at);
+        if chunk_end == total_records
+            || chunk_end.saturating_sub(last_progress_record) >= PROGRESS_RECORD_INTERVAL
+        {
+            progress.phase = format!("Scanning MFT records {} / {}", chunk_end, total_records);
+            emit_progress(window, progress, started_at);
+            last_progress_record = chunk_end;
+        }
         start_record = chunk_end;
     }
 
@@ -268,12 +272,48 @@ fn total_mft_records(volume: &volume::VolumeHandle, record_size: usize, stream_l
     }
 }
 
-fn should_skip_mft_entry(entry: &parser::MftEntry, metadata_record_ids: &HashSet<u64>) -> bool {
-    entry.name == "."
-        || entry.name == ".."
-        || entry.id == EXTEND_RECORD_ID
-        || METADATA_RECORD_IDS.contains(&entry.id)
-        || metadata_record_ids.contains(&entry.parent_id)
+fn should_skip_mft_entry(
+    entry: &parser::MftEntry,
+    metadata_record_ids: &MetadataRecordSet,
+) -> bool {
+    entry.name == "." || entry.name == ".." || metadata_record_ids.contains(entry.parent_id)
+}
+
+fn is_builtin_metadata_record(record_id: u64) -> bool {
+    record_id == ROOT_RECORD_ID
+        || record_id == EXTEND_RECORD_ID
+        || METADATA_RECORD_IDS.contains(&record_id)
+}
+
+#[derive(Debug, Clone)]
+struct MetadataRecordSet {
+    records: Vec<bool>,
+}
+
+impl MetadataRecordSet {
+    fn new(total_records: usize) -> Self {
+        let mut set = Self {
+            records: vec![false; total_records],
+        };
+        for record_id in METADATA_RECORD_IDS {
+            set.insert(record_id);
+        }
+        set.insert(EXTEND_RECORD_ID);
+        set
+    }
+
+    fn insert(&mut self, record_id: u64) {
+        if let Some(record) = self.records.get_mut(record_id as usize) {
+            *record = true;
+        }
+    }
+
+    fn contains(&self, record_id: u64) -> bool {
+        self.records
+            .get(record_id as usize)
+            .copied()
+            .unwrap_or(false)
+    }
 }
 
 fn map_volume_error(err: windows::core::Error) -> MftScanError {
@@ -309,22 +349,14 @@ mod tests {
 
     #[test]
     fn skips_known_ntfs_metadata_records() {
-        let metadata_record_ids = HashSet::from(METADATA_RECORD_IDS);
-        let badclus = parser::MftEntry {
-            id: 8,
-            parent_id: ROOT_RECORD_ID,
-            size: 0,
-            name: "$BadClus".to_string(),
-            is_dir: false,
-            flags: 0,
-        };
-
-        assert!(should_skip_mft_entry(&badclus, &metadata_record_ids));
+        assert!(is_builtin_metadata_record(8));
+        assert!(is_builtin_metadata_record(EXTEND_RECORD_ID));
+        assert!(is_builtin_metadata_record(ROOT_RECORD_ID));
     }
 
     #[test]
     fn keeps_regular_root_system_folders() {
-        let metadata_record_ids = HashSet::from(METADATA_RECORD_IDS);
+        let metadata_record_ids = MetadataRecordSet::new(64);
         let recycle_bin = parser::MftEntry {
             id: 42,
             parent_id: ROOT_RECORD_ID,
@@ -339,7 +371,8 @@ mod tests {
 
     #[test]
     fn skips_metadata_descendants_under_extend() {
-        let metadata_record_ids = HashSet::from([EXTEND_RECORD_ID, 24]);
+        let mut metadata_record_ids = MetadataRecordSet::new(64);
+        metadata_record_ids.insert(24);
         let usn_journal_stream = parser::MftEntry {
             id: 48,
             parent_id: 24,

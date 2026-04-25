@@ -1,40 +1,50 @@
-# Contributing to Oxide ⚡
+# Contributing to Oxide
 
-First off, thanks for taking the time to contribute! It's people like you that make Oxide better.
+Oxide is still evolving quickly, so the most useful contributions are narrowly scoped fixes, reproducible performance reports, and documentation updates that reflect the current code instead of the intended future state.
 
-## How Can I Contribute?
+## Before Opening a Pull Request
 
-### Reporting Bugs
-- Use the **Bug Report** template when opening an issue.
-- Describe the expected behavior and what actually happened.
-- Provide steps to reproduce the issue.
-
-### Suggesting Enhancements
-- Check the [Project Roadmap](docs/PROJECT_OVERVIEW.md#6-roadmap) to see if it's already planned.
-- Use the **Feature Request** template.
-
-### Pull Requests
-1. Fork the repo and create your branch from `main`.
-2. If you've added code that should be tested, add tests.
-3. Ensure the test suite passes.
-4. Update documentation if necessary.
-5. Create a Pull Request with a clear description of the transition.
+- Check whether the change already exists on `main`.
+- Keep the change focused. Separate refactors from behavior changes.
+- Add or update tests when the change affects shared behavior.
+- Update docs if the public behavior, workflow, or benchmark story changed.
 
 ## Development Setup
 
-### Rust Backend
-```bash
-cargo build
-cargo test
-```
-
-### Frontend
 ```bash
 pnpm install
-pnpm dev
+pnpm check
+pnpm build
+cd src-tauri
+cargo test
+cd ..
+pnpm tauri dev
 ```
 
-## Coding Standards
-- **Rust:** Run `cargo fmt` and `cargo clippy` before committing.
-- **JS/TS:** Use Prettier for formatting.
-- **Commits:** Use [Conventional Commits](https://www.conventionalcommits.org/).
+Run the terminal as Administrator if you want to exercise the fast NTFS MFT scan path.
+
+## Verification Expectations
+
+Before submitting a change, run the checks that match its risk:
+
+- `pnpm check`
+- `pnpm build`
+- `cargo test`
+
+If a change is explicitly performance-related, include the before/after numbers and describe how the run was captured.
+
+## Issue Reports
+
+Useful bug reports include:
+
+- Windows version
+- whether the app was elevated
+- scanned filesystem type
+- exact steps to reproduce
+- observed behavior
+- expected behavior
+- logs or screenshots when relevant
+
+## Performance Work
+
+Performance changes should be grounded in measurements. If you change scan speed, RAM use, query latency, or rendering behavior, update [docs/BENCHMARKS.md](docs/BENCHMARKS.md) or explain why the existing baseline should remain unchanged.

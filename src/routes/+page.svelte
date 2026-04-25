@@ -25,6 +25,8 @@
   let breadcrumbPath = $state<[number, string][]>([]);
   let isScanning = $state(false);
   let drivesLoading = $state(true);
+  let scanStartedAt = $state<number | null>(null);
+  let liveDurationMs = $state(0);
   const tauriAvailable = isTauri();
 
   async function loadDrives() {
@@ -62,6 +64,8 @@
     }
 
     isScanning = true;
+    scanStartedAt = Date.now();
+    liveDurationMs = 0;
     try {
       status = `Preparing scan for ${drive.letter}...`;
       const preparation = await invoke<PrepareScanResult>("prepare_scan", {
@@ -93,6 +97,7 @@
       });
 
       scanResult = result;
+      liveDurationMs = result.duration_ms;
       console.info("[oxide] scan profile", result.timings);
       rootId = result.root_id;
       status = result.fallback_reason
@@ -102,6 +107,7 @@
       status = `Scan failed: ${error}`;
     } finally {
       isScanning = false;
+      scanStartedAt = null;
     }
   }
 
@@ -135,6 +141,25 @@
     if (currentScanRoot) {
       updateBreadcrumbs();
     }
+  });
+
+  $effect(() => {
+    if (!isScanning || scanStartedAt === null) {
+      return;
+    }
+
+    const startedAt = scanStartedAt;
+    let frame = 0;
+    const updateDuration = () => {
+      liveDurationMs = Math.max(liveDurationMs, Date.now() - startedAt);
+      frame = window.requestAnimationFrame(updateDuration);
+    };
+
+    updateDuration();
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
   });
 
   onMount(() => {
@@ -233,12 +258,16 @@
     }
   }
 
-  function formatDuration(durationMs: number): string {
+  function formatDuration(durationMs: number, precise = false): string {
     if (durationMs < 1000) {
       return `${durationMs} ms`;
     }
 
     const seconds = durationMs / 1000;
+    if (precise) {
+      return `${seconds.toFixed(seconds >= 60 ? 0 : 1)} s`;
+    }
+
     return `${seconds.toFixed(seconds >= 10 ? 0 : 1)} s`;
   }
 
@@ -254,7 +283,10 @@
   const selectedDriveInfo = $derived(
     drives.find((drive) => drive.letter === selectedDrive) ?? null
   );
-  const visibleDuration = $derived(scanResult?.duration_ms ?? progress.duration_ms);
+  const visibleDuration = $derived(
+    isScanning ? Math.max(progress.duration_ms, liveDurationMs) : (scanResult?.duration_ms ?? progress.duration_ms)
+  );
+  const visibleDurationLabel = $derived(formatDuration(visibleDuration, isScanning));
   const currentScanMode = $derived(scanResult?.scan_mode ?? progress.scan_mode ?? null);
   const currentFallbackReason = $derived(
     scanResult?.fallback_reason ?? progress.fallback_reason ?? null
@@ -326,7 +358,7 @@
       </div>
       <div>
         <span>Time</span>
-        <strong>{formatDuration(visibleDuration)}</strong>
+        <strong>{visibleDurationLabel}</strong>
       </div>
     </div>
   </section>

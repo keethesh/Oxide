@@ -1,8 +1,9 @@
 [package]
 name = "oxide"
 version = "0.1.0"
-description = "Oxide - Lightning-fast disk space analyzer"
-authors = ["you"]
+description = "Windows-first NTFS disk space analyzer focused on speed and memory efficiency"
+authors = ["Keethesh Mootoosamy"]
+license = "MIT"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

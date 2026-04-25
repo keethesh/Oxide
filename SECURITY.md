@@ -4,10 +4,10 @@
 At this time, only the latest version of Oxide is supported for security updates.
 
 ## Reporting a Vulnerability
-We take the security of Oxide seriously. If you believe you have found a security vulnerability, please report it to us by following these steps:
+If you believe you have found a security vulnerability in Oxide:
 
-1. **Do not** open a public GitHub issue.
-2. Email the maintainer at (mailto:keethesh15@gmail.com).
-3. We will acknowledge your report within 48 hours and provide an estimated timeline for a fix.
+1. Do not open a public issue.
+2. Email `keethesh15@gmail.com` with the details.
+3. Include reproduction steps, impact, and any proof-of-concept material that helps validate the report.
 
-Please provide a detailed description of the vulnerability, including steps to reproduce it if possible.
+The project aims to acknowledge reports within 48 hours and follow up with remediation guidance or a fix timeline after the issue is validated.

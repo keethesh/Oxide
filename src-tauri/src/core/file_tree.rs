@@ -57,7 +57,16 @@ impl FileTree {
     }
 
     pub fn with_root(root_name: &str) -> Self {
-        let mut tree = Self::new();
+        Self::with_root_capacity(root_name, 1_000_000)
+    }
+
+    pub fn with_root_capacity(root_name: &str, entry_capacity: usize) -> Self {
+        let mut tree = Self {
+            entries: Vec::with_capacity(entry_capacity.max(1)),
+            names: StringArena::new(),
+            largest_files: Vec::new(),
+            largest_files_preview: Vec::new(),
+        };
         let (name_offset, name_len) = tree.names.push(root_name);
         tree.entries.push(FileEntry {
             size: 0,

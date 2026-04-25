@@ -29,7 +29,7 @@ Use the same machine and drive for repeated comparisons when possible.
 | Total nodes | Files plus folders |
 | Data size | Total scanned bytes displayed by Oxide |
 | Reported duration | Tool-reported scan duration |
-| Time to interactive | Measured time from starting the scan until the tree is usable |
+| Time to interactive | Measured time from starting the scan until the tree is usable, if captured |
 | Memory after scan | Resident memory after the scan completed and settled |
 | Nodes/sec | Total nodes divided by duration |
 | Files/sec | Files divided by duration |
@@ -40,25 +40,25 @@ Use the same machine and drive for repeated comparisons when possible.
 
 | Date | Build | Mode | Elevated | Files | Folders | Total nodes | Data size | Reported duration | Time to interactive | Memory after scan | Nodes/sec | Files/sec | Bytes/node | Notes |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 2026-04-25 | local dev | mft | yes | 4,041,909 | 733,450 | 4,775,359 | 369 GB | 20 s | 20 s | 430 MB | 238,768 | 202,095 | ~94.5 | Post-optimization baseline; total includes backend scan and initial UI rendering; memory unit assumed MiB for bytes/node estimate |
+| 2026-04-25 | local dev | mft | yes | 4,041,909 | 733,450 | 4,775,359 | 369 GB | 15.48 s | -- | 358 MB | 308,486 | 261,105 | ~78.6 | Active baseline from internal phase profile; time-to-interactive was not recaptured on this run; memory unit assumed MiB for bytes/node estimate |
 | 2026-04-25 | WizTree | mft-like NTFS metadata scan | assumed yes | 4,041,909 | 733,450 | 4,775,359 | 369 GB | 13.41 s | 21 s | 2.7 GB | 356,104 | 301,410 | ~592.7 | Self-reported scan time plus manual observed time until tree became visible; memory unit assumed GiB for bytes/node estimate |
 
 ## Current Baseline
 
-The active Oxide baseline scanned 4.78 million file-system nodes in 20 seconds from scan start through initial UI rendering and settled at about 430 MB of RAM. The first WizTree comparison on the same reported file set completed in 13.41 seconds by its own timer, became usable after about 21 seconds wall-clock, and settled at about 2.7 GB of RAM.
+The active Oxide baseline scanned 4.78 million file-system nodes in 15.48 seconds of measured backend time and settled at about 358 MB of RAM. The first WizTree comparison on the same reported file set completed in 13.41 seconds by its own timer, became usable after about 21 seconds wall-clock, and settled at about 2.7 GB of RAM.
 
 Calculated from the reported numbers:
 
 ```text
-Oxide:   4,775,359 nodes / 20.00 s = 238,768 nodes/sec
-Oxide:   4,041,909 files / 20.00 s = 202,095 files/sec
-Oxide:   430 MiB / 4,775,359 nodes = ~94.5 bytes/node
+Oxide:   4,775,359 nodes / 15.48 s = 308,486 nodes/sec
+Oxide:   4,041,909 files / 15.48 s = 261,105 files/sec
+Oxide:   358 MiB / 4,775,359 nodes = ~78.6 bytes/node
 WizTree: 4,775,359 nodes / 13.41 s = 356,104 nodes/sec
 WizTree: 4,041,909 files / 13.41 s = 301,410 files/sec
 WizTree: 2.7 GiB / 4,775,359 nodes = ~592.7 bytes/node
 ```
 
-At these measurements, WizTree is about 1.49x faster by its self-reported scan time, while Oxide is slightly faster by observed time to usable UI and uses about 6.3x less RAM after scan.
+At these measurements, WizTree is about 1.15x faster by its self-reported scan time, while Oxide uses about 7.7x less RAM after scan. A fresh time-to-interactive comparison should be recaptured before making a UI-latency claim from this baseline.
 
 ## Comparison Rules
 

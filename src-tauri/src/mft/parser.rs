@@ -78,48 +78,15 @@ pub fn parse_record_with_scratch(
                 let name_start = attr_offset + content_offset;
 
                 if name_start + 66 <= data.len() {
-                    parent_id = u64::from_le_bytes([
-                        data[name_start],
-                        data[name_start + 1],
-                        data[name_start + 2],
-                        data[name_start + 3],
-                        data[name_start + 4],
-                        data[name_start + 5],
-                        0,
-                        0, // MFT reference is 6 bytes
-                    ]);
-                    file_name_size = u64::from_le_bytes([
-                        data[name_start + 48],
-                        data[name_start + 49],
-                        data[name_start + 50],
-                        data[name_start + 51],
-                        data[name_start + 52],
-                        data[name_start + 53],
-                        data[name_start + 54],
-                        data[name_start + 55],
-                    ]);
-
                     let name_len = data[name_start + 64] as usize;
-                    let name_data_start = name_start + 66;
-                    let file_attributes = u32::from_le_bytes([
-                        data[name_start + 56],
-                        data[name_start + 57],
-                        data[name_start + 58],
-                        data[name_start + 59],
-                    ]);
+                    let name_type = data[name_start + 65];
+                    let is_preferred_name = name_type == 1 || name_type == 3;
+                    if found_name && !is_preferred_name {
+                        attr_offset += attr_len;
+                        continue;
+                    }
 
-                    if (file_attributes & 0x0000_0001) != 0 {
-                        entry_flags |= FileFlags::ReadOnly as u16;
-                    }
-                    if (file_attributes & 0x0000_0002) != 0 {
-                        entry_flags |= FileFlags::Hidden as u16;
-                    }
-                    if (file_attributes & 0x0000_0004) != 0 {
-                        entry_flags |= FileFlags::System as u16;
-                    }
-                    if (file_attributes & 0x0000_0400) != 0 {
-                        entry_flags |= FileFlags::Reparse as u16;
-                    }
+                    let name_data_start = name_start + 66;
 
                     if name_data_start + (name_len * 2) <= data.len() {
                         let current_name = decode_utf16((0..name_len).map(|i| {
@@ -131,9 +98,34 @@ pub fn parse_record_with_scratch(
                         .map(|result| result.unwrap_or(char::REPLACEMENT_CHARACTER))
                         .collect::<String>();
 
-                        // NTFS can have multiple names (DOS vs Win32). We prefer Win32.
-                        let name_type = data[name_start + 65];
-                        if !found_name || name_type == 1 || name_type == 3 {
+                        if !found_name || is_preferred_name {
+                            parent_id = u64::from_le_bytes([
+                                data[name_start],
+                                data[name_start + 1],
+                                data[name_start + 2],
+                                data[name_start + 3],
+                                data[name_start + 4],
+                                data[name_start + 5],
+                                0,
+                                0, // MFT reference is 6 bytes
+                            ]);
+                            file_name_size = u64::from_le_bytes([
+                                data[name_start + 48],
+                                data[name_start + 49],
+                                data[name_start + 50],
+                                data[name_start + 51],
+                                data[name_start + 52],
+                                data[name_start + 53],
+                                data[name_start + 54],
+                                data[name_start + 55],
+                            ]);
+                            let file_attributes = u32::from_le_bytes([
+                                data[name_start + 56],
+                                data[name_start + 57],
+                                data[name_start + 58],
+                                data[name_start + 59],
+                            ]);
+                            entry_flags = apply_file_attributes(entry_flags, file_attributes);
                             name = current_name;
                             found_name = true;
                         }
@@ -232,4 +224,20 @@ fn apply_fixup<'a>(data: &'a [u8], scratch: &'a mut Vec<u8>) -> Option<&'a [u8]>
     }
 
     Some(scratch)
+}
+
+fn apply_file_attributes(mut flags: u16, file_attributes: u32) -> u16 {
+    if (file_attributes & 0x0000_0001) != 0 {
+        flags |= FileFlags::ReadOnly as u16;
+    }
+    if (file_attributes & 0x0000_0002) != 0 {
+        flags |= FileFlags::Hidden as u16;
+    }
+    if (file_attributes & 0x0000_0004) != 0 {
+        flags |= FileFlags::System as u16;
+    }
+    if (file_attributes & 0x0000_0400) != 0 {
+        flags |= FileFlags::Reparse as u16;
+    }
+    flags
 }
