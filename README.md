@@ -92,7 +92,13 @@ Performance baselines and capture rules live in [docs/BENCHMARKS.md](docs/BENCHM
 GitHub Actions is configured for two repository workflows:
 
 - `CI` runs on pull requests and pushes to `main` on `windows-latest`, then executes `pnpm check`, `pnpm build`, and `cargo test`.
-- `Release Main` runs on pushes to `main` and updates a rolling GitHub prerelease tagged `main` with the latest Windows Tauri bundle.
+- `Release Main` runs on pushes to `main`, computes a prerelease version from the repo version plus the GitHub Actions run number, syncs that version across the app manifests, and publishes a Windows Tauri prerelease to GitHub Releases.
+
+For manual version maintenance, use:
+
+```bash
+pnpm sync-version --version 0.2.0
+```
 
 ## License
 
