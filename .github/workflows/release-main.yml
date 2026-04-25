@@ -48,7 +48,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tauriScript: npm exec -- tauri
           tagName: ${{ steps.version.outputs.release_version }}
           releaseName: Oxide ${{ steps.version.outputs.release_version }}
           releaseBody: |
