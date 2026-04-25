@@ -52,3 +52,7 @@ The intended verification flow for this MVP is:
 - `cargo test`
 
 If `cargo test` fails because the machine is low on free disk space, clear space on the system drive and rerun it before shipping.
+
+## Benchmarks
+
+Performance baselines and capture rules live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Record scan duration, post-scan memory, scan mode, elevation state, and file/folder counts before comparing against other disk analyzers.

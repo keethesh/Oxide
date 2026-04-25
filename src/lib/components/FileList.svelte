@@ -1,8 +1,11 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import type { FileRow } from "$lib/types";
+  import type { FilePathRow, FileRow } from "$lib/types";
 
   const PAGE_SIZE = 200;
+  const ROW_HEIGHT = 40;
+  const OVERSCAN = 15;
 
   let {
     scanLoaded,
@@ -14,45 +17,178 @@
     onNavigate: (id: number) => void;
   }>();
 
-  let files = $state<FileRow[]>([]);
+  type HydratedFileRow = FileRow & {
+    path?: string;
+  };
+
+  let viewport = $state<HTMLDivElement | undefined>(undefined);
+  let files = $state<HydratedFileRow[]>([]);
   let loading = $state(false);
   let hasMore = $state(false);
   let error = $state("");
   let lastLoadedRoot = $state<number | null>(null);
+  let loadingPathIds = $state(new Set<number>());
+  let scrollTop = $state(0);
+  let viewportHeight = $state(320);
+  let generation = 0;
 
-  async function loadPage(reset = false) {
+  function observeViewport(node: HTMLDivElement) {
+    const resizeObserver = new ResizeObserver((entries) => {
+      viewportHeight = entries[0]?.contentRect.height ?? 320;
+    });
+    resizeObserver.observe(node);
+
+    return {
+      destroy() {
+        resizeObserver.disconnect();
+      }
+    };
+  }
+
+  function addLoadingPaths(fileIds: Iterable<number>) {
+    const nextLoading = new Set(loadingPathIds);
+    let changed = false;
+
+    for (const id of fileIds) {
+      if (!nextLoading.has(id)) {
+        nextLoading.add(id);
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      loadingPathIds = nextLoading;
+    }
+  }
+
+  function removeLoadingPaths(fileIds: Iterable<number>) {
+    const nextLoading = new Set(loadingPathIds);
+    let changed = false;
+
+    for (const id of fileIds) {
+      changed = nextLoading.delete(id) || changed;
+    }
+
+    if (changed) {
+      loadingPathIds = nextLoading;
+    }
+  }
+
+  async function loadPage(targetRootId: number, reset = false) {
     if (!scanLoaded || loading) {
       return;
     }
 
+    const requestGeneration = generation;
     loading = true;
     try {
       const offset = reset ? 0 : files.length;
       const nextPage = await invoke<FileRow[]>("get_largest_files", {
-        rootId,
+        rootId: targetRootId,
         offset,
         limit: PAGE_SIZE
       });
 
-      files = reset ? nextPage : [...files, ...nextPage];
+      if (requestGeneration !== generation) {
+        return;
+      }
+
+      const hydratedPage = nextPage.map((file) => ({ ...file }));
+      files = reset ? hydratedPage : [...files, ...hydratedPage];
       hasMore = nextPage.length === PAGE_SIZE;
       error = "";
-      lastLoadedRoot = rootId;
+      lastLoadedRoot = targetRootId;
     } catch (err) {
-      error = `Failed to load files: ${err}`;
+      if (requestGeneration === generation) {
+        error = `Failed to load files: ${err}`;
+      }
     } finally {
-      loading = false;
+      if (requestGeneration === generation) {
+        loading = false;
+      }
     }
   }
+
+  async function hydratePaths(fileIds: number[]) {
+    const hydratedIds = new Set(files.filter((file) => file.path).map((file) => file.id));
+    const missingIds = fileIds.filter(
+      (id) => !hydratedIds.has(id) && !loadingPathIds.has(id)
+    );
+    if (missingIds.length === 0) {
+      return;
+    }
+
+    const requestGeneration = generation;
+    addLoadingPaths(missingIds);
+
+    try {
+      const rows = await invoke<FilePathRow[]>("get_file_paths", {
+        fileIds: missingIds
+      });
+
+      if (requestGeneration !== generation) {
+        return;
+      }
+
+      const pathById = new Map(rows.map((row) => [row.id, row.path]));
+      const unresolvedIds = new Set(missingIds.filter((id) => !pathById.has(id)));
+      files = files.map((file) => {
+        const path = pathById.get(file.id);
+        if (path !== undefined) {
+          return file.path === path ? file : { ...file, path };
+        }
+        if (unresolvedIds.has(file.id) && file.path === undefined) {
+          return { ...file, path: "Path unavailable" };
+        }
+        return file;
+      });
+    } catch (err) {
+      if (requestGeneration === generation) {
+        error = `Failed to load file paths: ${err}`;
+      }
+    } finally {
+      if (requestGeneration === generation) {
+        removeLoadingPaths(missingIds);
+      }
+    }
+  }
+
+  function pathFor(file: HydratedFileRow) {
+    return file.path ?? "Loading path...";
+  }
+
+  function handleScroll() {
+    scrollTop = viewport?.scrollTop ?? 0;
+  }
+
+  const totalHeight = $derived(Math.max(files.length * ROW_HEIGHT, ROW_HEIGHT));
+  const startIndex = $derived(Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN));
+  const endIndex = $derived(
+    Math.min(files.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN)
+  );
+  const renderedRows = $derived.by(() => {
+    const start = startIndex;
+    return files.slice(start, endIndex).map((file, index) => ({
+      file,
+      top: (start + index) * ROW_HEIGHT
+    }));
+  });
 
   $effect(() => {
     const loaded = scanLoaded;
     const currentRoot = rootId;
+
     if (!loaded) {
+      generation += 1;
       files = [];
       hasMore = false;
       error = "";
       lastLoadedRoot = null;
+      loadingPathIds = new Set();
+      scrollTop = 0;
+      if (viewport) {
+        viewport.scrollTop = 0;
+      }
       return;
     }
 
@@ -60,17 +196,53 @@
       return;
     }
 
+    generation += 1;
     files = [];
     hasMore = false;
     error = "";
-    loadPage(true);
+    loadingPathIds = new Set();
+    lastLoadedRoot = currentRoot;
+    scrollTop = 0;
+    if (viewport) {
+      viewport.scrollTop = 0;
+    }
+
+    untrack(() => {
+      void loadPage(currentRoot, true);
+    });
+  });
+
+  $effect(() => {
+    const currentRoot = rootId;
+    const nearEnd = endIndex >= files.length - OVERSCAN * 2;
+
+    if (!scanLoaded || !hasMore || loading || currentRoot !== lastLoadedRoot || !nearEnd) {
+      return;
+    }
+
+    untrack(() => {
+      void loadPage(currentRoot, false);
+    });
+  });
+
+  $effect(() => {
+    const currentRoot = rootId;
+    const visibleIds = renderedRows.map(({ file }) => file.id);
+
+    if (!scanLoaded || currentRoot !== lastLoadedRoot || visibleIds.length === 0) {
+      return;
+    }
+
+    untrack(() => {
+      void hydratePaths(visibleIds);
+    });
   });
 </script>
 
 <div class="file-list">
   <div class="heading">
     <h2>Largest Files</h2>
-    <p>Top files within the selected subtree.</p>
+    <p>Selected scope</p>
   </div>
 
   {#if !scanLoaded}
@@ -78,44 +250,42 @@
   {:else if error}
     <p class="message error">{error}</p>
   {:else}
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Size</th>
-          <th>Path</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#if files.length === 0 && loading}
-          <tr>
-            <td colspan="3" class="message">Loading files...</td>
-          </tr>
-        {:else if files.length === 0}
-          <tr>
-            <td colspan="3" class="message">No files found in this location.</td>
-          </tr>
-        {:else}
-          {#each files as file (file.id)}
-            <tr>
-              <td>
-                <button class="row-link" onclick={() => onNavigate(file.parent_id)}>
-                  {file.name}
-                </button>
-              </td>
-              <td>{formatSize(file.size)}</td>
-              <td class="path">{file.path}</td>
-            </tr>
-          {/each}
-        {/if}
-      </tbody>
-    </table>
+    <div class="table">
+      <div class="table-head">
+        <span>Name</span>
+        <span>Size</span>
+        <span>Path</span>
+      </div>
 
-    {#if hasMore}
-      <button class="load-more" disabled={loading} onclick={() => loadPage(false)}>
-        {loading ? "Loading..." : "Load More"}
-      </button>
-    {/if}
+      {#if files.length === 0 && loading}
+        <p class="message">Loading files...</p>
+      {:else if files.length === 0}
+        <p class="message">No files found in this location.</p>
+      {:else}
+        <div class="viewport" bind:this={viewport} use:observeViewport onscroll={handleScroll}>
+          <div class="canvas" style={`height: ${totalHeight}px`}>
+            {#each renderedRows as { file, top } (file.id)}
+              <div class="row" style={`top: ${top}px; height: ${ROW_HEIGHT}px`}>
+                <button class="name-cell" onclick={() => onNavigate(file.parent_id)}>
+                  <span class="name">{file.name}</span>
+                  {#if file.is_hidden}
+                    <span class="badge">Hidden</span>
+                  {/if}
+                </button>
+                <span class="size">{formatSize(file.size)}</span>
+                <span class="path">{pathFor(file)}</span>
+              </div>
+            {/each}
+          </div>
+        </div>
+
+        {#if loading}
+          <p class="message">Loading more files...</p>
+        {:else if hasMore}
+          <p class="message">Scroll to load more.</p>
+        {/if}
+      {/if}
+    </div>
   {/if}
 </div>
 
@@ -137,9 +307,19 @@
   .file-list {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 0.5rem;
     width: 100%;
-    color: #d7d7d7;
+    height: 100%;
+    color: #e6e0d5;
+    min-height: 0;
+  }
+
+  .heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-height: 28px;
   }
 
   .heading h2,
@@ -148,76 +328,118 @@
   }
 
   .heading h2 {
-    font-size: 1rem;
-    color: #f7f7f7;
+    font-size: 0.88rem;
+    color: #f6f2e9;
   }
 
   .heading p,
   .message {
-    font-size: 0.85rem;
-    color: #949494;
+    font-size: 0.76rem;
+    color: #a8a094;
   }
 
   .error {
-    color: #ff8f7a;
+    color: #ffb199;
   }
 
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid #2f2f2f;
-    border-radius: 12px;
+  .table {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    flex: 1;
+    border: 1px solid rgba(236, 232, 223, 0.08);
     overflow: hidden;
+    background: #121412;
   }
 
-  th,
-  td {
-    padding: 0.8rem;
-    text-align: left;
-    border-bottom: 1px solid #2b2b2b;
-    vertical-align: top;
+  .table-head,
+  .row {
+    display: grid;
+    grid-template-columns: minmax(120px, 1.4fr) 88px minmax(160px, 2fr);
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0 0.8rem;
+    box-sizing: border-box;
   }
 
-  th {
-    color: #999;
+  .table-head {
+    min-height: 34px;
+    border-bottom: 1px solid rgba(236, 232, 223, 0.08);
+    color: #a8a094;
     font-size: 0.78rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
   }
 
-  tbody tr:last-child td {
-    border-bottom: none;
+  .viewport {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
   }
 
-  .row-link {
+  .canvas {
+    position: relative;
+    width: 100%;
+  }
+
+  .row {
+    position: absolute;
+    left: 0;
+    right: 0;
+    border-bottom: 1px solid rgba(236, 232, 223, 0.06);
+  }
+
+  .name-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
     border: none;
     background: transparent;
-    color: #ff8b67;
+    color: #d7ff6f;
     cursor: pointer;
     padding: 0;
     font: inherit;
     text-align: left;
   }
 
+  .name,
   .path {
-    color: #a6a6a6;
-    word-break: break-word;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .load-more {
-    align-self: flex-start;
-    border: 1px solid #ff5d2a;
-    background: #ff5d2a;
-    color: #fff;
-    border-radius: 999px;
-    padding: 0.65rem 1rem;
-    cursor: pointer;
-    font-weight: 600;
+  .size {
+    color: #f6f2e9;
+    white-space: nowrap;
   }
 
-  .load-more:disabled {
-    cursor: wait;
-    opacity: 0.7;
+  .path {
+    color: #a8a094;
+  }
+
+  .badge {
+    display: inline-flex;
+    border: 1px solid rgba(255, 177, 153, 0.35);
+    border-radius: 4px;
+    padding: 0.08rem 0.45rem;
+    color: #ffb199;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+  }
+
+  @media (max-width: 760px) {
+    .table-head,
+    .row {
+      grid-template-columns: minmax(120px, 1fr) 80px;
+    }
+
+    .path {
+      display: none;
+    }
   }
 </style>

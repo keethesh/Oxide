@@ -28,4 +28,8 @@ impl FileEntry {
     pub fn is_dir(&self) -> bool {
         (self.flags & FileFlags::Directory as u16) != 0
     }
+
+    pub fn is_hidden(&self) -> bool {
+        (self.flags & FileFlags::Hidden as u16) != 0
+    }
 }

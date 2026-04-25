@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke, isTauri } from "@tauri-apps/api/core";
   import FileList from "$lib/components/FileList.svelte";
   import Treemap from "$lib/components/Treemap.svelte";
   import TreeView from "$lib/components/TreeView.svelte";
@@ -25,8 +25,17 @@
   let breadcrumbPath = $state<[number, string][]>([]);
   let isScanning = $state(false);
   let drivesLoading = $state(true);
+  const tauriAvailable = isTauri();
 
   async function loadDrives() {
+    if (!tauriAvailable) {
+      drives = [];
+      selectedDrive = "";
+      status = "Browser preview mode. Open the Tauri app to scan local drives.";
+      drivesLoading = false;
+      return;
+    }
+
     drivesLoading = true;
     try {
       drives = await invoke<DriveInfo[]>("list_drives");
@@ -42,6 +51,11 @@
   }
 
   async function scan(requestedDrive = selectedDriveInfo?.letter ?? selectedDrive) {
+    if (!tauriAvailable) {
+      status = "Scan is only available in the Tauri desktop app.";
+      return;
+    }
+
     const drive = drives.find((candidate) => candidate.letter === requestedDrive) ?? null;
     if (!drive?.supported || isScanning) {
       return;
@@ -79,6 +93,7 @@
       });
 
       scanResult = result;
+      console.info("[oxide] scan profile", result.timings);
       rootId = result.root_id;
       status = result.fallback_reason
         ? `Scan complete for ${result.drive_letter} using ${modeLabel(result.scan_mode)} after fallback.`
@@ -91,7 +106,7 @@
   }
 
   async function updateBreadcrumbs() {
-    if (!scanResult) {
+    if (!tauriAvailable || !scanResult) {
       breadcrumbPath = [];
       return;
     }
@@ -123,12 +138,23 @@
   });
 
   onMount(() => {
-    const unlisten = listen<ScanProgress>("scan-progress", (event) => {
-      progress = event.payload;
-    });
+    let cleanup = () => {};
+
+    if (tauriAvailable) {
+      const unlisten = listen<ScanProgress>("scan-progress", (event) => {
+        progress = event.payload;
+      });
+      cleanup = () => {
+        void unlisten.then((fn) => fn());
+      };
+    }
 
     void (async () => {
       await loadDrives();
+
+      if (!tauriAvailable) {
+        return;
+      }
 
       try {
         const launchRequest = await invoke<LaunchScanRequest>("get_launch_scan_request");
@@ -142,7 +168,7 @@
     })();
 
     return () => {
-      unlisten.then((fn) => fn());
+      cleanup();
     };
   });
 
@@ -216,9 +242,19 @@
     return `${seconds.toFixed(seconds >= 10 ? 0 : 1)} s`;
   }
 
+  function formatProfile(result: ScanResult | null): string {
+    if (!result) {
+      return "";
+    }
+
+    const timings = result.timings;
+    return `Profile: scan ${formatDuration(timings.scan_ms)} · aggregate ${formatDuration(timings.aggregate_ms)} · largest-file index ${formatDuration(timings.largest_files_ms)} · store ${formatDuration(timings.store_ms)} · total ${formatDuration(timings.total_ms)}`;
+  }
+
   const selectedDriveInfo = $derived(
     drives.find((drive) => drive.letter === selectedDrive) ?? null
   );
+  const visibleDuration = $derived(scanResult?.duration_ms ?? progress.duration_ms);
   const currentScanMode = $derived(scanResult?.scan_mode ?? progress.scan_mode ?? null);
   const currentFallbackReason = $derived(
     scanResult?.fallback_reason ?? progress.fallback_reason ?? null
@@ -229,21 +265,22 @@
   const fallbackSummary = $derived(
     currentFallbackReason ? fallbackDescription(currentFallbackReason) : ""
   );
+  const profileSummary = $derived(formatProfile(scanResult));
 </script>
 
 <svelte:head>
   <title>Oxide</title>
 </svelte:head>
 
-<main class="container">
-  <header>
+<main class="shell">
+  <header class="topbar">
     <div class="brand">
-      <p class="eyebrow">Windows NTFS Disk Analyzer</p>
-      <h1>Oxide</h1>
+      <strong>Oxide</strong>
+      <span>NTFS disk analyzer</span>
     </div>
 
-    <div class="controls">
-      <label class="selector">
+    <div class="scan-strip">
+      <label class="drive-picker">
         <span>Drive</span>
         <select bind:value={selectedDrive} disabled={drivesLoading || isScanning || !drives.length}>
           {#each drives as drive}
@@ -259,22 +296,22 @@
         disabled={!selectedDriveInfo?.supported || isScanning || drivesLoading}
         onclick={() => scan()}
       >
-        {isScanning ? "Scanning..." : "Scan Drive"}
+        {isScanning ? "Scanning" : "Scan"}
       </button>
     </div>
   </header>
 
-  <section class="hero">
-    <div>
-      <p class="status-label">Status</p>
-      <p class="status-text">{status}</p>
-      <p class="scan-meta">{scanModeSummary}</p>
-      {#if fallbackSummary}
-        <p class="scan-meta warning">{fallbackSummary}</p>
+  <section class="status-rail">
+    <div class="status-copy">
+      <span class="status-kicker">{progress.phase}</span>
+      <strong>{status}</strong>
+      <span>{fallbackSummary || scanModeSummary}</span>
+      {#if profileSummary}
+        <span class="profile-line">{profileSummary}</span>
       {/if}
     </div>
 
-    <div class="stats">
+    <div class="metrics" aria-label="Scan metrics">
       <div>
         <span>Files</span>
         <strong>{progress.files_scanned.toLocaleString()}</strong>
@@ -284,27 +321,33 @@
         <strong>{progress.dirs_scanned.toLocaleString()}</strong>
       </div>
       <div>
-        <span>Bytes</span>
+        <span>Size</span>
         <strong>{formatSize(progress.bytes_scanned)}</strong>
       </div>
       <div>
-        <span>Elapsed</span>
-        <strong>{formatDuration(progress.duration_ms)}</strong>
+        <span>Time</span>
+        <strong>{formatDuration(visibleDuration)}</strong>
       </div>
     </div>
   </section>
 
   {#if drivesLoading}
-    <section class="panel empty">Loading drives...</section>
+    <section class="empty-state">Loading drives...</section>
   {:else if !drives.length}
-    <section class="panel empty">No local drives were detected on this system.</section>
+    <section class="empty-state">
+      {#if tauriAvailable}
+        No local drives were detected on this system.
+      {:else}
+        Browser preview mode is running without the Tauri bridge.
+      {/if}
+    </section>
   {:else if selectedDriveInfo && !selectedDriveInfo.supported}
-    <section class="panel empty">
+    <section class="empty-state">
       {selectedDriveInfo.letter} is formatted as {selectedDriveInfo.filesystem}. This MVP only supports NTFS volumes.
     </section>
   {:else if scanResult}
-    <div class="app-layout">
-      <aside class="sidebar">
+    <div class="workspace">
+      <aside class="navigator" aria-label="Folder navigator">
         <TreeView
           scanLoaded={true}
           scanRootId={scanResult.root_id}
@@ -313,8 +356,8 @@
         />
       </aside>
 
-      <section class="main-view">
-        <div class="toolbar">
+      <section class="visual-stage" aria-label="Disk visualization">
+        <div class="stage-toolbar">
           <div class="breadcrumb">
             {#each breadcrumbPath as [id, name], index (id)}
               {#if index > 0}
@@ -324,7 +367,7 @@
             {/each}
           </div>
 
-          <nav class="tabs">
+          <nav class="view-tabs" aria-label="View mode">
             <button class:active={activeTab === "treemap"} onclick={() => (activeTab = "treemap")}>
               Treemap
             </button>
@@ -334,7 +377,7 @@
           </nav>
         </div>
 
-        <div class="content">
+        <div class="visual-content">
           {#if activeTab === "treemap"}
             <Treemap {rootId} onNavigate={handleNavigate} />
           {:else}
@@ -342,28 +385,17 @@
           {/if}
         </div>
       </section>
+
+      <aside class="inspector" aria-label="Largest files">
+        <FileList scanLoaded={true} {rootId} onNavigate={handleNavigate} />
+      </aside>
     </div>
   {:else}
-    <section class="panel empty">
-      Select an NTFS drive and run a scan. Oxide will build a treemap, folder hierarchy, and largest-file view for the scanned volume.
+    <section class="empty-state start">
+      <strong>Choose a drive to inspect.</strong>
+      <span>Oxide will map the folder tree, render a treemap, and keep the largest files close at hand.</span>
     </section>
   {/if}
-
-  <footer class="status-bar">
-    <div class="progress-info">
-      <span class="phase">{progress.phase}</span>
-      {#if currentScanMode}
-        <span>{modeLabel(currentScanMode)}</span>
-      {/if}
-      {#if currentFallbackReason}
-        <span class="warning">{fallbackDescription(currentFallbackReason)}</span>
-      {/if}
-      {#if progress.done && scanResult}
-        <span>{scanResult.drive_letter} ready</span>
-      {/if}
-    </div>
-    <p class="status-msg">NTFS-only MVP. Oxide now prefers raw MFT scans and falls back automatically when needed.</p>
-  </footer>
 </main>
 
 <style>
@@ -371,88 +403,107 @@
     margin: 0;
     padding: 0;
     min-height: 100vh;
-    background:
-      radial-gradient(circle at top left, rgba(255, 96, 46, 0.2), transparent 28%),
-      linear-gradient(180deg, #181818 0%, #111111 100%);
-    color: #f1f1f1;
-    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    background: #111312;
+    color: #ece8df;
+    font-family: "Aptos", "Segoe UI", sans-serif;
   }
 
-  .container {
-    display: flex;
-    flex-direction: column;
-    min-height: 100vh;
-  }
-
-  header {
-    display: flex;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 1.5rem 2rem 1rem;
-  }
-
-  .brand,
-  .controls,
-  .stats {
-    display: flex;
-    gap: 1rem;
-  }
-
-  .brand {
-    flex-direction: column;
-  }
-
-  .eyebrow,
-  .status-label {
-    margin: 0;
-    color: #ff9c79;
-    font-size: 0.78rem;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-  }
-
-  h1,
-  .status-text {
-    margin: 0;
-  }
-
-  h1 {
-    font-size: clamp(2rem, 4vw, 3rem);
-    line-height: 1;
-  }
-
-  .controls {
-    align-items: end;
-    flex-wrap: wrap;
-  }
-
-  .selector {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    font-size: 0.85rem;
-    color: #b9b9b9;
-  }
-
-  select,
-  .scan-button {
-    border-radius: 999px;
-    border: 1px solid #393939;
-    background: rgba(255, 255, 255, 0.06);
-    color: #fff;
-    padding: 0.7rem 1rem;
+  :global(button),
+  :global(select) {
     font: inherit;
   }
 
+  .shell {
+    --panel: #181b19;
+    --panel-strong: #20231f;
+    --line: #313730;
+    --line-soft: rgba(236, 232, 223, 0.09);
+    --text-muted: #a8a094;
+    --accent: #d7ff6f;
+    --accent-ink: #1c220b;
+    --warn: #ffb199;
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr);
+    gap: 10px;
+    height: 100vh;
+    padding: 10px;
+    box-sizing: border-box;
+  }
+
+  .topbar,
+  .status-rail,
+  .workspace {
+    border: 1px solid var(--line);
+    background: var(--panel);
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    min-height: 58px;
+    padding: 8px 10px 8px 14px;
+    box-sizing: border-box;
+  }
+
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 10rem;
+  }
+
+  .brand strong {
+    color: #f6f2e9;
+    font-size: 1.15rem;
+    letter-spacing: 0;
+  }
+
+  .brand span,
+  .drive-picker span,
+  .status-copy span,
+  .metrics span {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+  }
+
+  .scan-strip {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    min-width: min(42rem, 60vw);
+  }
+
+  .drive-picker {
+    display: grid;
+    grid-template-columns: auto minmax(14rem, 26rem);
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+  }
+
   select {
-    min-width: 16rem;
+    min-width: 0;
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #111312;
+    color: #ece8df;
+    padding: 0.55rem 0.65rem;
   }
 
   .scan-button {
-    background: linear-gradient(135deg, #ff5d2a, #ff8b67);
-    border-color: transparent;
+    min-width: 5.75rem;
+    border: 1px solid color-mix(in srgb, var(--accent), #111312 35%);
+    border-radius: 6px;
+    background: var(--accent);
+    color: var(--accent-ink);
     cursor: pointer;
-    font-weight: 700;
+    font-weight: 800;
+    padding: 0.58rem 0.9rem;
   }
 
   .scan-button:disabled,
@@ -461,197 +512,261 @@
     opacity: 0.55;
   }
 
-  .hero {
-    display: flex;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 0 2rem 1rem;
+  .status-rail {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    min-height: 74px;
+    padding: 10px 14px;
+    box-sizing: border-box;
   }
 
-  .status-text {
-    font-size: 1.05rem;
-    color: #f5f5f5;
+  .status-copy {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
   }
 
-  .scan-meta {
-    margin: 0.4rem 0 0;
-    color: #bcbcbc;
-    font-size: 0.9rem;
-  }
-
-  .warning {
-    color: #ffb49b;
-  }
-
-  .stats {
-    flex-wrap: wrap;
-  }
-
-  .stats div {
-    min-width: 8rem;
-    border: 1px solid #2d2d2d;
-    border-radius: 16px;
-    background: rgba(255, 255, 255, 0.03);
-    padding: 0.85rem 1rem;
-  }
-
-  .stats span {
-    display: block;
-    color: #9e9e9e;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .stats strong {
-    display: block;
-    margin-top: 0.25rem;
+  .status-copy strong {
+    overflow: hidden;
+    color: #f6f2e9;
     font-size: 1rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .panel,
-  .app-layout {
-    flex: 1;
+  .profile-line {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .status-kicker {
+    color: var(--accent) !important;
+    text-transform: uppercase;
+  }
+
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(6.5rem, auto));
+    gap: 1px;
+    overflow: hidden;
+    border: 1px solid var(--line-soft);
+    background: var(--line-soft);
+  }
+
+  .metrics div {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+    background: #151715;
+    padding: 8px 10px;
+  }
+
+  .metrics strong {
+    overflow: hidden;
+    color: #f6f2e9;
+    font-size: 0.95rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .workspace {
+    display: grid;
+    grid-template-columns: minmax(16rem, 22rem) minmax(0, 1fr) minmax(20rem, 28rem);
+    gap: 1px;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--line);
+  }
+
+  .navigator,
+  .visual-stage,
+  .inspector {
+    background: var(--panel);
     min-height: 0;
   }
 
-  .panel.empty {
-    margin: 0 2rem 1.5rem;
-    border: 1px dashed #3b3b3b;
-    border-radius: 24px;
-    padding: 1.5rem;
-    color: #b2b2b2;
-    background: rgba(255, 255, 255, 0.02);
-  }
-
-  .app-layout {
-    display: flex;
-    gap: 1rem;
-    padding: 0 2rem 1.5rem;
-  }
-
-  .sidebar,
-  .main-view {
-    border: 1px solid #2d2d2d;
-    border-radius: 24px;
-    background: rgba(12, 12, 12, 0.88);
-    min-height: 0;
-  }
-
-  .sidebar {
-    width: 21rem;
+  .navigator,
+  .inspector {
     overflow: auto;
   }
 
-  .main-view {
-    flex: 1;
+  .visual-stage {
     display: flex;
     flex-direction: column;
     overflow: hidden;
   }
 
-  .toolbar {
+  .stage-toolbar {
     display: flex;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 1rem 1rem 0;
     align-items: center;
-    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 10px;
+    min-height: 48px;
+    padding: 7px 8px 7px 12px;
+    border-bottom: 1px solid var(--line);
+    box-sizing: border-box;
   }
 
   .breadcrumb {
     display: flex;
-    gap: 0.4rem;
-    align-items: center;
     flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
   }
 
   .bc-item,
-  .tabs button {
+  .view-tabs button {
     border: none;
     background: transparent;
-    color: #ff8b67;
+    color: #e8e1d6;
     cursor: pointer;
-    font: inherit;
+  }
+
+  .bc-item {
+    max-width: 12rem;
+    overflow: hidden;
+    padding: 0.25rem 0.35rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .bc-item:hover {
+    color: var(--accent);
   }
 
   .sep {
-    color: #666;
+    color: #6d746d;
   }
 
-  .tabs {
+  .view-tabs {
     display: flex;
-    gap: 0.5rem;
+    align-items: center;
+    gap: 1px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--line);
+    flex-shrink: 0;
   }
 
-  .tabs button {
-    border-radius: 999px;
-    padding: 0.55rem 0.95rem;
-    color: #a7a7a7;
+  .view-tabs button {
+    background: #151715;
+    color: var(--text-muted);
+    padding: 0.42rem 0.7rem;
   }
 
-  .tabs button.active {
-    background: rgba(255, 93, 42, 0.14);
-    color: #fff;
+  .view-tabs button.active {
+    background: #e7edda;
+    color: #151715;
+    font-weight: 800;
   }
 
-  .content {
+  .visual-content {
     flex: 1;
     min-height: 0;
-    padding: 1rem;
-    overflow: auto;
-  }
-
-  .status-bar {
     display: flex;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 0.85rem 2rem 1rem;
-    border-top: 1px solid #262626;
-    color: #9a9a9a;
-    font-size: 0.85rem;
+    padding: 8px;
+    overflow: hidden;
   }
 
-  .progress-info {
-    display: flex;
-    gap: 0.75rem;
-    flex-wrap: wrap;
+  .visual-content > :global(*) {
+    min-height: 0;
   }
 
-  .phase {
-    color: #ff8b67;
-    font-weight: 700;
+  .empty-state {
+    display: grid;
+    place-content: center;
+    gap: 8px;
+    min-height: 0;
+    border: 1px dashed var(--line);
+    background: var(--panel);
+    color: var(--text-muted);
+    padding: 2rem;
+    text-align: center;
   }
 
-  .status-msg {
-    margin: 0;
-    text-align: right;
+  .empty-state strong {
+    color: #f6f2e9;
   }
 
-  @media (max-width: 960px) {
-    header,
-    .hero,
-    .app-layout,
-    .status-bar {
-      padding-left: 1rem;
-      padding-right: 1rem;
+  @media (max-width: 1180px) {
+    .workspace {
+      grid-template-columns: minmax(15rem, 20rem) minmax(0, 1fr);
     }
 
-    .app-layout {
+    .inspector {
+      display: none;
+    }
+  }
+
+  @media (max-width: 860px) {
+    .shell {
+      height: auto;
+      min-height: 100vh;
+      grid-template-rows: auto auto minmax(34rem, 1fr);
+    }
+
+    .topbar,
+    .status-rail {
+      grid-template-columns: 1fr;
+    }
+
+    .topbar,
+    .scan-strip,
+    .status-rail {
+      align-items: stretch;
+    }
+
+    .topbar,
+    .scan-strip {
       flex-direction: column;
     }
 
-    .sidebar {
-      width: auto;
-      max-height: 18rem;
+    .drive-picker {
+      grid-template-columns: 1fr;
     }
 
-    .status-bar {
+    .metrics {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .workspace {
+      grid-template-columns: 1fr;
+      grid-template-rows: minmax(12rem, 16rem) minmax(28rem, 1fr);
+    }
+  }
+
+  @media (max-width: 520px) {
+    .shell {
+      padding: 6px;
+      gap: 6px;
+    }
+
+    .brand {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .metrics {
+      grid-template-columns: 1fr;
+    }
+
+    .stage-toolbar {
+      align-items: stretch;
       flex-direction: column;
     }
 
-    .status-msg {
-      text-align: left;
+    .view-tabs {
+      width: 100%;
+    }
+
+    .view-tabs button {
+      flex: 1;
     }
   }
 </style>

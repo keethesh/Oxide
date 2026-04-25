@@ -11,6 +11,15 @@ export interface ScanProgress {
   bytes_scanned: number;
   phase: string;
   done: boolean;
+  duration_ms: number;
+}
+
+export interface ScanTimings {
+  scan_ms: number;
+  aggregate_ms: number;
+  largest_files_ms: number;
+  store_ms: number;
+  total_ms: number;
 }
 
 export interface ScanResult {
@@ -19,6 +28,8 @@ export interface ScanResult {
   files_scanned: number;
   dirs_scanned: number;
   bytes_scanned: number;
+  duration_ms: number;
+  timings: ScanTimings;
 }
 
 export interface NodeSummary {

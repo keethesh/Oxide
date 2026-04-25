@@ -1,3 +1,7 @@
+use std::char::decode_utf16;
+
+use crate::core::file_entry::FileFlags;
+
 #[derive(Debug, Clone)]
 pub struct MftEntry {
     pub id: u64,
@@ -5,10 +9,20 @@ pub struct MftEntry {
     pub size: u64,
     pub name: String,
     pub is_dir: bool,
+    pub flags: u16,
 }
 
 pub fn parse_record(data: &[u8], entry_id: u64) -> Option<MftEntry> {
-    let data = apply_fixup(data)?;
+    let mut scratch = Vec::with_capacity(data.len());
+    parse_record_with_scratch(data, entry_id, &mut scratch)
+}
+
+pub fn parse_record_with_scratch(
+    data: &[u8],
+    entry_id: u64,
+    scratch: &mut Vec<u8>,
+) -> Option<MftEntry> {
+    let data = apply_fixup(data, scratch)?;
     if data.len() < 42 || &data[0..4] != b"FILE" {
         return Option::None;
     }
@@ -24,7 +38,13 @@ pub fn parse_record(data: &[u8], entry_id: u64) -> Option<MftEntry> {
     let mut name = String::new();
     let mut parent_id = 0;
     let mut size = 0;
+    let mut file_name_size = 0;
     let mut found_name = false;
+    let mut entry_flags = if is_dir {
+        FileFlags::Directory as u16
+    } else {
+        0
+    };
 
     // Iterate through attributes
     while attr_offset + 8 < data.len() {
@@ -68,21 +88,48 @@ pub fn parse_record(data: &[u8], entry_id: u64) -> Option<MftEntry> {
                         0,
                         0, // MFT reference is 6 bytes
                     ]);
+                    file_name_size = u64::from_le_bytes([
+                        data[name_start + 48],
+                        data[name_start + 49],
+                        data[name_start + 50],
+                        data[name_start + 51],
+                        data[name_start + 52],
+                        data[name_start + 53],
+                        data[name_start + 54],
+                        data[name_start + 55],
+                    ]);
 
                     let name_len = data[name_start + 64] as usize;
                     let name_data_start = name_start + 66;
+                    let file_attributes = u32::from_le_bytes([
+                        data[name_start + 56],
+                        data[name_start + 57],
+                        data[name_start + 58],
+                        data[name_start + 59],
+                    ]);
+
+                    if (file_attributes & 0x0000_0001) != 0 {
+                        entry_flags |= FileFlags::ReadOnly as u16;
+                    }
+                    if (file_attributes & 0x0000_0002) != 0 {
+                        entry_flags |= FileFlags::Hidden as u16;
+                    }
+                    if (file_attributes & 0x0000_0004) != 0 {
+                        entry_flags |= FileFlags::System as u16;
+                    }
+                    if (file_attributes & 0x0000_0400) != 0 {
+                        entry_flags |= FileFlags::Reparse as u16;
+                    }
 
                     if name_data_start + (name_len * 2) <= data.len() {
-                        let utf16_data: Vec<u16> = (0..name_len)
-                            .map(|i| {
-                                u16::from_le_bytes([
-                                    data[name_data_start + i * 2],
-                                    data[name_data_start + i * 2 + 1],
-                                ])
-                            })
-                            .collect();
-
-                        let current_name = String::from_utf16_lossy(&utf16_data);
+                        let current_name = decode_utf16((0..name_len).map(|i| {
+                            u16::from_le_bytes([
+                                data[name_data_start + i * 2],
+                                data[name_data_start + i * 2 + 1],
+                            ])
+                        }))
+                        .map(|result| result.unwrap_or(char::REPLACEMENT_CHARACTER))
+                        .collect::<String>();
 
                         // NTFS can have multiple names (DOS vs Win32). We prefer Win32.
                         let name_type = data[name_start + 65];
@@ -127,20 +174,25 @@ pub fn parse_record(data: &[u8], entry_id: u64) -> Option<MftEntry> {
     }
 
     if found_name {
+        if !is_dir && size == 0 {
+            size = file_name_size;
+        }
+
         Some(MftEntry {
             id: entry_id,
             parent_id,
             size,
             name,
             is_dir,
+            flags: entry_flags,
         })
     } else {
         None
     }
 }
 
-fn apply_fixup(data: &[u8]) -> Option<Vec<u8>> {
-    if data.len() < 8 {
+fn apply_fixup<'a>(data: &'a [u8], scratch: &'a mut Vec<u8>) -> Option<&'a [u8]> {
+    if data.len() < 42 || &data[0..4] != b"FILE" {
         return None;
     }
 
@@ -155,25 +207,29 @@ fn apply_fixup(data: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let mut record = data.to_vec();
-    let update_sequence = record[update_sequence_offset..update_sequence_end].to_vec();
-    let sequence_number = [update_sequence[0], update_sequence[1]];
+    scratch.clear();
+    scratch.extend_from_slice(data);
+    let sequence_number = [
+        scratch[update_sequence_offset],
+        scratch[update_sequence_offset + 1],
+    ];
 
     for sector_index in 1..update_sequence_count {
         let fixup_offset = sector_index * 512 - 2;
-        if fixup_offset + 2 > record.len() {
+        let replacement_offset = update_sequence_offset + sector_index * 2;
+        if fixup_offset + 2 > scratch.len() || replacement_offset + 2 > update_sequence_end {
             return None;
         }
 
-        if record[fixup_offset] != sequence_number[0]
-            || record[fixup_offset + 1] != sequence_number[1]
+        if scratch[fixup_offset] != sequence_number[0]
+            || scratch[fixup_offset + 1] != sequence_number[1]
         {
             return None;
         }
 
-        record[fixup_offset..fixup_offset + 2]
-            .copy_from_slice(&update_sequence[sector_index * 2..sector_index * 2 + 2]);
+        scratch[fixup_offset] = scratch[replacement_offset];
+        scratch[fixup_offset + 1] = scratch[replacement_offset + 1];
     }
 
-    Some(record)
+    Some(scratch)
 }

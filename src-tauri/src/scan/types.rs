@@ -47,6 +47,16 @@ pub struct ScanResult {
     pub scan_mode: ScanMode,
     pub fallback_reason: Option<FallbackReason>,
     pub duration_ms: u64,
+    pub timings: ScanTimings,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ScanTimings {
+    pub scan_ms: u64,
+    pub aggregate_ms: u64,
+    pub largest_files_ms: u64,
+    pub store_ms: u64,
+    pub total_ms: u64,
 }
 
 impl PrepareScanResult {

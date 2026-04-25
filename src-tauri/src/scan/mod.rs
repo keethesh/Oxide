@@ -3,18 +3,14 @@ pub mod mft;
 pub mod progress;
 pub mod types;
 
-use crate::core::file_entry::{FileEntry, FileFlags};
+use crate::core::file_entry::FileEntry;
 use crate::core::file_tree::FileTree;
 use progress::ScanProgress;
 use std::time::Instant;
 use tauri::{Emitter, Window};
 
-pub(crate) fn add_entry(tree: &mut FileTree, name: &str, size: u64, is_dir: bool) -> u32 {
+pub(crate) fn add_entry(tree: &mut FileTree, name: &str, size: u64, flags: u16) -> u32 {
     let (name_offset, name_len) = tree.names.push(name);
-    let mut flags = 0;
-    if is_dir {
-        flags |= FileFlags::Directory as u16;
-    }
 
     tree.add_entry(FileEntry {
         size,

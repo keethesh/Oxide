@@ -1,121 +1,248 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import type { TreemapRect } from "$lib/types";
 
-  interface LayoutRect {
-    id: number;
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-  }
+  const LABEL_MIN_WIDTH = 72;
+  const LABEL_MIN_HEIGHT = 22;
+  const HOVER_BORDER = "#fff7eb";
 
-  let { rootId = 0, onNavigate } = $props<{ 
-    rootId: number, 
-    onNavigate: (id: number) => void 
+  let {
+    rootId = 0,
+    onNavigate
+  } = $props<{
+    rootId: number;
+    onNavigate: (id: number) => void;
   }>();
 
   let canvas: HTMLCanvasElement;
-  let ctx: CanvasRenderingContext2D | null = null;
-  let layout: LayoutRect[] = $state([]);
-  let width = $state(800);
-  let height = $state(600);
   let container: HTMLDivElement;
-  let hoveredId = $state<number | null>(null);
+  let ctx: CanvasRenderingContext2D | null = null;
+  let layout = $state<TreemapRect[]>([]);
+  let width = $state(0);
+  let height = $state(0);
+  let pixelRatio = $state(1);
+  let hoveredRect = $state<TreemapRect | null>(null);
+  let layoutLoading = $state(false);
+  let layoutError = $state("");
+  let requestId = 0;
+  let layoutFrame = 0;
+  let renderFrame = 0;
+  let lastLayoutKey = "";
+  let pointerActive = false;
+  let pointerX = 0;
+  let pointerY = 0;
 
-  async function updateLayout() {
-    if (!canvas) return;
+  function bucket(value: number) {
+    return Math.max(32, Math.round(value / 32) * 32);
+  }
+
+  async function updateLayout(targetRootId: number, targetWidth: number, targetHeight: number) {
+    if (!canvas || targetWidth <= 0 || targetHeight <= 0) {
+      return;
+    }
+
+    const layoutKey = `${targetRootId}:${bucket(targetWidth)}x${bucket(targetHeight)}`;
+    if (layoutKey === lastLayoutKey && layout.length > 0) {
+      return;
+    }
+
+    const currentRequestId = ++requestId;
+    layoutLoading = true;
+    layoutError = "";
+
     try {
-      layout = await invoke("get_treemap_layout", {
-        rootId,
-        width,
-        height,
+      const nextLayout = await invoke<TreemapRect[]>("get_treemap_layout", {
+        rootId: targetRootId,
+        width: targetWidth,
+        height: targetHeight
       });
-      render();
-    } catch (e) {
-      console.error("Failed to get layout", e);
+
+      if (currentRequestId !== requestId) {
+        return;
+      }
+
+      layout = nextLayout;
+      hoveredRect = null;
+      lastLayoutKey = layoutKey;
+      scheduleRender();
+    } catch (error) {
+      if (currentRequestId !== requestId) {
+        return;
+      }
+
+      layout = [];
+      hoveredRect = null;
+      layoutError = `Failed to build treemap: ${error}`;
+      scheduleRender();
+    } finally {
+      if (currentRequestId === requestId) {
+        layoutLoading = false;
+      }
     }
   }
 
-  $effect(() => {
-    // Re-run layout when rootId changes
-    const _id = rootId;
-    updateLayout();
-  });
+  function scheduleLayout(targetRootId: number, targetWidth: number, targetHeight: number) {
+    if (layoutFrame) {
+      cancelAnimationFrame(layoutFrame);
+    }
 
-  function handleMouseMove(e: MouseEvent) {
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    layoutFrame = requestAnimationFrame(() => {
+      layoutFrame = 0;
+      void updateLayout(targetRootId, targetWidth, targetHeight);
+    });
+  }
 
-    hoveredId = null;
-    for (const item of layout) {
-      if (x >= item.x && x <= item.x + item.w && y >= item.y && y <= item.y + item.h) {
-        hoveredId = item.id;
-        break;
+  function findRectAt(x: number, y: number): TreemapRect | null {
+    for (let index = layout.length - 1; index >= 0; index -= 1) {
+      const rect = layout[index];
+      if (x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h) {
+        return rect;
       }
     }
-    render();
+
+    return null;
+  }
+
+  function scheduleRender() {
+    if (renderFrame) {
+      return;
+    }
+
+    renderFrame = requestAnimationFrame(() => {
+      renderFrame = 0;
+      const nextHoveredRect = pointerActive ? findRectAt(pointerX, pointerY) : null;
+      if (!sameRect(nextHoveredRect, hoveredRect)) {
+        hoveredRect = nextHoveredRect;
+      }
+      render();
+    });
+  }
+
+  function handleMouseMove(event: MouseEvent) {
+    const bounds = canvas.getBoundingClientRect();
+    pointerActive = true;
+    pointerX = event.clientX - bounds.left;
+    pointerY = event.clientY - bounds.top;
+    scheduleRender();
+  }
+
+  function handleMouseLeave() {
+    pointerActive = false;
+    scheduleRender();
   }
 
   function handleClick() {
-    if (hoveredId !== null) {
-      onNavigate(hoveredId);
+    if (hoveredRect?.kind === "node" && hoveredRect.id !== null) {
+      onNavigate(hoveredRect.id);
     }
   }
 
   function render() {
-    if (!ctx) return;
+    if (!ctx) {
+      return;
+    }
+
+    ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     ctx.clearRect(0, 0, width, height);
 
     for (const rect of layout) {
-      const isHovered = rect.id === hoveredId;
-      const hue = (rect.id * 137.5) % 360;
-      
-      // Background
-      ctx.fillStyle = `hsl(${hue}, 60%, ${isHovered ? 60 : 40}%)`;
+      const isHovered = sameRect(rect, hoveredRect);
+      const fill = rect.kind === "overflow"
+        ? isHovered
+          ? "#6a554d"
+          : "#4d3a34"
+        : `hsl(${((rect.id ?? 0) * 137.5) % 360}, 54%, ${isHovered ? 56 : 42}%)`;
+
+      ctx.fillStyle = fill;
       ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
 
-      // Cushion effect
-      const gradient = ctx.createRadialGradient(
-        rect.x + rect.w/2, rect.y + rect.h/2, 0,
-        rect.x + rect.w/2, rect.y + rect.h/2, Math.max(rect.w, rect.h)
-      );
-      gradient.addColorStop(0, "rgba(255, 255, 255, 0.15)");
-      gradient.addColorStop(1, "rgba(0, 0, 0, 0.3)");
-      ctx.fillStyle = gradient;
-      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
-
-      // Border
-      ctx.strokeStyle = isHovered ? "#fff" : "#000";
-      ctx.lineWidth = isHovered ? 2 : 0.5;
+      ctx.strokeStyle = isHovered ? HOVER_BORDER : "rgba(17, 17, 17, 0.45)";
+      ctx.lineWidth = isHovered ? 2 : 1;
       ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+
+      if (rect.w >= LABEL_MIN_WIDTH && rect.h >= LABEL_MIN_HEIGHT) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(rect.x + 2, rect.y + 2, rect.w - 4, rect.h - 4);
+        ctx.clip();
+        ctx.fillStyle = "rgba(255, 250, 244, 0.92)";
+        ctx.font = "12px 'Segoe UI', sans-serif";
+        ctx.textBaseline = "top";
+        ctx.fillText(rect.label, rect.x + 8, rect.y + 6, Math.max(0, rect.w - 16));
+        ctx.restore();
+      }
     }
+  }
+
+  function sameRect(left: TreemapRect | null, right: TreemapRect | null) {
+    return left?.id === right?.id && left?.kind === right?.kind && left?.label === right?.label;
   }
 
   onMount(() => {
     ctx = canvas.getContext("2d");
-    
+
     const resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        width = entry.contentRect.width;
-        height = entry.contentRect.height;
-        updateLayout();
-      }
+      width = entries[0]?.contentRect.width ?? 0;
+      height = entries[0]?.contentRect.height ?? 0;
+      pixelRatio = Math.max(1, window.devicePixelRatio || 1);
     });
 
     resizeObserver.observe(container);
-    return () => resizeObserver.disconnect();
+
+    return () => {
+      if (layoutFrame) {
+        cancelAnimationFrame(layoutFrame);
+      }
+      if (renderFrame) {
+        cancelAnimationFrame(renderFrame);
+      }
+      resizeObserver.disconnect();
+    };
   });
+
+  $effect(() => {
+    const currentRootId = rootId;
+    const currentWidth = width;
+    const currentHeight = height;
+
+    if (currentWidth <= 0 || currentHeight <= 0) {
+      return;
+    }
+
+    untrack(() => {
+      scheduleLayout(currentRootId, currentWidth, currentHeight);
+    });
+  });
+
+  $effect(() => {
+    layout;
+    hoveredRect;
+    width;
+    height;
+    pixelRatio;
+    scheduleRender();
+  });
+
+  const canvasWidth = $derived(Math.max(1, Math.round(width * pixelRatio)));
+  const canvasHeight = $derived(Math.max(1, Math.round(height * pixelRatio)));
 </script>
 
 <div class="treemap-container" bind:this={container}>
-  <canvas 
-    bind:this={canvas} 
-    {width} 
-    {height}
+  {#if layoutLoading}
+    <div class="overlay">Rendering treemap...</div>
+  {:else if layoutError}
+    <div class="overlay error">{layoutError}</div>
+  {:else if layout.some((rect) => rect.kind === "overflow")}
+    <div class="overlay subtle">Small tiles grouped into Other</div>
+  {/if}
+
+  <canvas
+    bind:this={canvas}
+    width={canvasWidth}
+    height={canvasHeight}
     onmousemove={handleMouseMove}
-    onmouseleave={() => { hoveredId = null; render(); }}
+    onmouseleave={handleMouseLeave}
     onclick={handleClick}
   ></canvas>
 </div>
@@ -124,15 +251,35 @@
   .treemap-container {
     width: 100%;
     height: 100%;
-    background: #1a1a1a;
+    background: #101210;
     overflow: hidden;
     position: relative;
-    border-radius: 8px;
-    border: 1px solid #333;
+    border: 1px solid rgba(236, 232, 223, 0.08);
+  }
+
+  .overlay {
+    position: absolute;
+    top: 1rem;
+    left: 1rem;
+    z-index: 1;
+    border-radius: 4px;
+    background: rgba(10, 10, 10, 0.72);
+    padding: 0.45rem 0.8rem;
+    color: #f6f2e9;
+    font-size: 0.82rem;
+  }
+
+  .overlay.error {
+    color: #ffb199;
+  }
+
+  .overlay.subtle {
+    color: #a8a094;
   }
 
   canvas {
     display: block;
-    image-rendering: pixelated;
+    width: 100%;
+    height: 100%;
   }
 </style>

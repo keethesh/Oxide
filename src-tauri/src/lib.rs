@@ -4,18 +4,20 @@ pub mod scan;
 pub mod treemap;
 
 use core::file_entry::FileEntry;
-use core::file_tree::{FileRow, FileTree, NodeSummary};
+use core::file_tree::{ChildPage, FilePathRow, FileRow, FileTree};
 use scan::progress::ScanProgress;
 use scan::types::{
     FallbackReason, LaunchScanRequest, PrepareScanAction, PrepareScanResult, ScanMode, ScanResult,
+    ScanTimings,
 };
+use std::collections::HashMap;
 use std::env;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
-use treemap::layout::{self, LayoutInput, LayoutRect, Rect};
+use treemap::layout::{self, LayoutInput, LayoutRect, LayoutRectKind, Rect};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Foundation::HANDLE;
@@ -25,7 +27,8 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 pub struct AppState {
-    tree: Mutex<FileTree>,
+    tree: Arc<RwLock<FileTree>>,
+    treemap_layout_cache: Arc<Mutex<TreemapLayoutCache>>,
     prepared_scan: Mutex<Option<PreparedScanState>>,
     launch_scan_request: Mutex<Option<String>>,
 }
@@ -35,6 +38,84 @@ struct PreparedScanState {
     drive_letter: String,
     mode: ScanMode,
     fallback_reason: Option<FallbackReason>,
+}
+
+const TREEMAP_MAX_RECTS: usize = 400;
+const TREEMAP_CACHE_CAPACITY: usize = 16;
+const TREEMAP_BUCKET_SIZE: f32 = 32.0;
+const TREEMAP_RECURSE_MIN_SIDE: f32 = 72.0;
+const TREEMAP_RECURSE_PADDING: f32 = 1.0;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LayoutCacheKey {
+    root_id: u32,
+    width_bucket: u32,
+    height_bucket: u32,
+}
+
+#[derive(Debug, Clone)]
+struct CachedLayout {
+    width: f32,
+    height: f32,
+    layout: Vec<LayoutRect>,
+}
+
+#[derive(Debug)]
+struct TreemapLayoutCache {
+    entries: HashMap<LayoutCacheKey, CachedLayout>,
+    order: Vec<LayoutCacheKey>,
+    capacity: usize,
+}
+
+impl TreemapLayoutCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: Vec::new(),
+            capacity,
+        }
+    }
+
+    fn get(&mut self, key: &LayoutCacheKey, width: f32, height: f32) -> Option<Vec<LayoutRect>> {
+        let cached = self.entries.get(key)?.clone();
+        self.touch(key.clone());
+        Some(scale_layout(
+            &cached.layout,
+            cached.width,
+            cached.height,
+            width,
+            height,
+        ))
+    }
+
+    fn insert(&mut self, key: LayoutCacheKey, width: f32, height: f32, layout: Vec<LayoutRect>) {
+        self.entries.insert(
+            key.clone(),
+            CachedLayout {
+                width,
+                height,
+                layout,
+            },
+        );
+        self.touch(key.clone());
+
+        while self.order.len() > self.capacity {
+            if let Some(oldest_key) = self.order.first().cloned() {
+                self.order.remove(0);
+                self.entries.remove(&oldest_key);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    fn touch(&mut self, key: LayoutCacheKey) {
+        self.order.retain(|existing| existing != &key);
+        self.order.push(key);
+    }
 }
 
 #[tauri::command]
@@ -106,7 +187,7 @@ async fn scan_drive(
     let window_clone = window.clone();
     let drive_letter_clone = drive_letter.clone();
 
-    let (tree, result) = tokio::task::spawn_blocking(move || {
+    let (tree, mut result) = tokio::task::spawn_blocking(move || {
         run_scan(
             &window_clone,
             &drive_letter_clone,
@@ -119,77 +200,343 @@ async fn scan_drive(
     .await
     .map_err(|err| format!("Scan task failed: {err}"))??;
 
-    let mut state_tree = state.tree.lock().unwrap();
+    let store_started_at = Instant::now();
+    let mut state_tree = state.tree.write().unwrap();
     *state_tree = tree;
+    drop(state_tree);
+    state.treemap_layout_cache.lock().unwrap().clear();
+    let store_ms = elapsed_ms(store_started_at);
+    result.timings.store_ms = store_ms;
+    result.timings.total_ms = result.timings.total_ms.saturating_add(store_ms);
+    result.duration_ms = result.timings.total_ms;
+
+    eprintln!(
+        "oxide scan profile drive={} mode={:?} scan_ms={} aggregate_ms={} largest_files_ms={} store_ms={} total_ms={}",
+        result.drive_letter,
+        result.scan_mode,
+        result.timings.scan_ms,
+        result.timings.aggregate_ms,
+        result.timings.largest_files_ms,
+        result.timings.store_ms,
+        result.timings.total_ms
+    );
 
     Ok(result)
 }
 
 #[tauri::command]
-fn get_children(state: tauri::State<'_, AppState>, node_id: u32) -> Vec<NodeSummary> {
-    let tree = state.tree.lock().unwrap();
-    tree.get_children(node_id)
+async fn get_children(
+    state: tauri::State<'_, AppState>,
+    node_id: u32,
+    offset: usize,
+    limit: usize,
+) -> Result<ChildPage, String> {
+    let tree = state.tree.clone();
+    tokio::task::spawn_blocking(move || {
+        let started_at = Instant::now();
+        let tree = tree.read().unwrap();
+        let page = tree.get_children_page(node_id, offset, limit);
+        log_slow_query(
+            "get_children",
+            started_at,
+            format!(
+                "node_id={node_id} returned={} total={}",
+                page.items.len(),
+                page.total
+            ),
+        );
+        page
+    })
+    .await
+    .map_err(|err| format!("Child query task failed: {err}"))
 }
 
 #[tauri::command]
-fn get_largest_files(
+async fn get_largest_files(
     state: tauri::State<'_, AppState>,
     root_id: u32,
     offset: usize,
     limit: usize,
-) -> Vec<FileRow> {
-    let tree = state.tree.lock().unwrap();
-    tree.get_largest_files(root_id, offset, limit)
+) -> Result<Vec<FileRow>, String> {
+    let tree = state.tree.clone();
+    tokio::task::spawn_blocking(move || {
+        let started_at = Instant::now();
+        let tree = tree.read().unwrap();
+        let rows = tree.get_largest_files(root_id, offset, limit);
+        log_slow_query(
+            "get_largest_files",
+            started_at,
+            format!("root_id={root_id} returned={}", rows.len()),
+        );
+        rows
+    })
+    .await
+    .map_err(|err| format!("Largest-files query task failed: {err}"))
 }
 
 #[tauri::command]
-fn get_treemap_layout(
+async fn get_file_paths(
+    state: tauri::State<'_, AppState>,
+    file_ids: Vec<u32>,
+) -> Result<Vec<FilePathRow>, String> {
+    let tree = state.tree.clone();
+    tokio::task::spawn_blocking(move || {
+        let tree = tree.read().unwrap();
+        tree.get_file_paths(&file_ids)
+    })
+    .await
+    .map_err(|err| format!("File-path query task failed: {err}"))
+}
+
+#[tauri::command]
+async fn get_treemap_layout(
     state: tauri::State<'_, AppState>,
     root_id: u32,
     width: f32,
     height: f32,
-) -> Vec<LayoutRect> {
-    let tree = state.tree.lock().unwrap();
-    if tree.entries.is_empty() || !tree.has_node(root_id) {
+) -> Result<Vec<LayoutRect>, String> {
+    let tree = state.tree.clone();
+    let cache = state.treemap_layout_cache.clone();
+    tokio::task::spawn_blocking(move || {
+        let started_at = Instant::now();
+        if width <= 0.0 || height <= 0.0 {
+            return Vec::new();
+        }
+
+        let cache_key = LayoutCacheKey {
+            root_id,
+            width_bucket: dimension_bucket(width),
+            height_bucket: dimension_bucket(height),
+        };
+        if let Some(layout) = cache.lock().unwrap().get(&cache_key, width, height) {
+            return layout;
+        }
+
+        let tree = tree.read().unwrap();
+        if tree.entries.is_empty() || !tree.has_node(root_id) {
+            return Vec::new();
+        }
+
+        let layout = build_recursive_treemap(
+            &tree,
+            root_id,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: width,
+                h: height,
+            },
+            TREEMAP_MAX_RECTS,
+        );
+        drop(tree);
+
+        cache
+            .lock()
+            .unwrap()
+            .insert(cache_key, width, height, layout.clone());
+        log_slow_query(
+            "get_treemap_layout",
+            started_at,
+            format!("root_id={root_id} rects={}", layout.len()),
+        );
+
+        layout
+    })
+    .await
+    .map_err(|err| format!("Treemap query task failed: {err}"))
+}
+
+#[tauri::command]
+async fn get_file_path(
+    state: tauri::State<'_, AppState>,
+    id: u32,
+) -> Result<Vec<(u32, String)>, String> {
+    let tree = state.tree.clone();
+    tokio::task::spawn_blocking(move || {
+        let tree = tree.read().unwrap();
+        tree.get_file_path(id)
+    })
+    .await
+    .map_err(|err| format!("Breadcrumb query task failed: {err}"))
+}
+
+fn build_treemap_inputs(tree: &FileTree, root_id: u32, max_rects: usize) -> Vec<LayoutInput> {
+    if max_rects == 0 || !tree.has_node(root_id) {
         return Vec::new();
     }
 
-    let mut inputs = Vec::new();
+    let mut candidates = Vec::new();
     let mut child_idx = tree.entries[root_id as usize].first_child_index;
 
     while child_idx != FileEntry::NULL_INDEX {
         let entry = &tree.entries[child_idx as usize];
         if entry.size > 0 {
-            inputs.push(LayoutInput {
-                id: child_idx,
-                value: entry.size,
-            });
+            candidates.push((child_idx, entry.size));
         }
         child_idx = entry.next_sibling_index;
     }
 
-    layout::squarify(
-        inputs,
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            w: width,
-            h: height,
-        },
-    )
+    candidates.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let mut inputs = Vec::new();
+
+    if candidates.len() > max_rects {
+        let overflow_start = max_rects.saturating_sub(1);
+        let overflow_value: u64 = candidates[overflow_start..]
+            .iter()
+            .map(|(_, value)| *value)
+            .sum();
+
+        for (child_id, value) in candidates.into_iter().take(overflow_start) {
+            inputs.push(LayoutInput {
+                id: Some(child_id),
+                label: tree.display_name(child_id),
+                kind: LayoutRectKind::Node,
+                value,
+            });
+        }
+
+        inputs.push(LayoutInput {
+            id: None,
+            label: "Other".to_string(),
+            kind: LayoutRectKind::Overflow,
+            value: overflow_value,
+        });
+        return inputs;
+    }
+
+    for (child_id, value) in candidates {
+        inputs.push(LayoutInput {
+            id: Some(child_id),
+            label: tree.display_name(child_id),
+            kind: LayoutRectKind::Node,
+            value,
+        });
+    }
+
+    inputs
 }
 
-#[tauri::command]
-fn get_file_path(state: tauri::State<'_, AppState>, id: u32) -> Vec<(u32, String)> {
-    let tree = state.tree.lock().unwrap();
-    tree.get_file_path(id)
+fn build_recursive_treemap(
+    tree: &FileTree,
+    root_id: u32,
+    bounds: Rect,
+    max_rects: usize,
+) -> Vec<LayoutRect> {
+    let mut layout = Vec::with_capacity(max_rects);
+    append_treemap_layout(tree, root_id, bounds, max_rects, &mut layout);
+    layout
+}
+
+fn append_treemap_layout(
+    tree: &FileTree,
+    root_id: u32,
+    bounds: Rect,
+    max_rects: usize,
+    layout: &mut Vec<LayoutRect>,
+) {
+    if layout.len() >= max_rects || bounds.w <= 0.0 || bounds.h <= 0.0 {
+        return;
+    }
+
+    let remaining = max_rects - layout.len();
+    let node_layout = layout::squarify(build_treemap_inputs(tree, root_id, remaining), bounds);
+    if node_layout.is_empty() {
+        return;
+    }
+
+    let start_index = layout.len();
+    layout.extend(node_layout);
+
+    for rect in layout[start_index..].to_vec() {
+        if layout.len() >= max_rects
+            || rect.kind != LayoutRectKind::Node
+            || rect.w < TREEMAP_RECURSE_MIN_SIDE
+            || rect.h < TREEMAP_RECURSE_MIN_SIDE
+        {
+            continue;
+        }
+
+        let Some(child_id) = rect.id else {
+            continue;
+        };
+        let child_entry = &tree.entries[child_id as usize];
+        if !child_entry.is_dir() || child_entry.first_child_index == FileEntry::NULL_INDEX {
+            continue;
+        }
+
+        let child_bounds = inset_rect(&rect, TREEMAP_RECURSE_PADDING);
+        append_treemap_layout(tree, child_id, child_bounds, max_rects, layout);
+    }
+}
+
+fn inset_rect(rect: &LayoutRect, padding: f32) -> Rect {
+    let width = (rect.w - padding * 2.0).max(0.0);
+    let height = (rect.h - padding * 2.0).max(0.0);
+
+    Rect {
+        x: rect.x + padding,
+        y: rect.y + padding,
+        w: width,
+        h: height,
+    }
+}
+
+fn dimension_bucket(value: f32) -> u32 {
+    ((value / TREEMAP_BUCKET_SIZE).round().max(1.0)) as u32
+}
+
+fn scale_layout(
+    layout: &[LayoutRect],
+    source_width: f32,
+    source_height: f32,
+    target_width: f32,
+    target_height: f32,
+) -> Vec<LayoutRect> {
+    if layout.is_empty()
+        || source_width <= 0.0
+        || source_height <= 0.0
+        || (source_width - target_width).abs() < f32::EPSILON
+            && (source_height - target_height).abs() < f32::EPSILON
+    {
+        return layout.to_vec();
+    }
+
+    let scale_x = target_width / source_width;
+    let scale_y = target_height / source_height;
+
+    layout
+        .iter()
+        .map(|rect| LayoutRect {
+            id: rect.id,
+            kind: rect.kind,
+            label: rect.label.clone(),
+            x: rect.x * scale_x,
+            y: rect.y * scale_y,
+            w: rect.w * scale_x,
+            h: rect.h * scale_y,
+        })
+        .collect()
+}
+
+fn log_slow_query(name: &str, started_at: Instant, details: String) {
+    let elapsed = started_at.elapsed();
+    if elapsed.as_millis() >= 250 {
+        eprintln!(
+            "[oxide] slow query {name} took {} ms ({details})",
+            elapsed.as_millis()
+        );
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
-            tree: Mutex::new(FileTree::new()),
+            tree: Arc::new(RwLock::new(FileTree::new())),
+            treemap_layout_cache: Arc::new(Mutex::new(TreemapLayoutCache::new(
+                TREEMAP_CACHE_CAPACITY,
+            ))),
             prepared_scan: Mutex::new(None),
             launch_scan_request: Mutex::new(parse_launch_scan_request()),
         })
@@ -201,6 +548,7 @@ pub fn run() {
             scan_drive,
             get_children,
             get_largest_files,
+            get_file_paths,
             get_treemap_layout,
             get_file_path
         ])
@@ -221,6 +569,7 @@ fn run_scan(
     progress.fallback_reason = initial_fallback;
     scan::emit_progress(window, &mut progress, started_at);
 
+    let scan_started_at = Instant::now();
     let (mut tree, actual_mode, fallback_reason) = match requested_mode {
         ScanMode::Mft => match scan::mft::scan(drive, window, &mut progress, started_at) {
             Ok(tree) => (tree, ScanMode::Mft, initial_fallback),
@@ -254,6 +603,7 @@ fn run_scan(
             (tree, ScanMode::Filesystem, initial_fallback)
         }
     };
+    let scan_ms = elapsed_ms(scan_started_at);
 
     let root_id = tree.root_id();
 
@@ -261,12 +611,21 @@ fn run_scan(
     progress.scan_mode = Some(actual_mode);
     progress.fallback_reason = fallback_reason;
     scan::emit_progress(window, &mut progress, started_at);
+
+    let aggregate_started_at = Instant::now();
     tree.aggregate_sizes();
+    let aggregate_ms = elapsed_ms(aggregate_started_at);
+
+    progress.phase = "Indexing largest files".to_string();
+    scan::emit_progress(window, &mut progress, started_at);
+    let largest_files_started_at = Instant::now();
     tree.rebuild_largest_files();
+    let largest_files_ms = elapsed_ms(largest_files_started_at);
 
     progress.phase = "Completed".to_string();
     progress.done = true;
     scan::emit_progress(window, &mut progress, started_at);
+    let total_ms = elapsed_ms(started_at);
 
     Ok((
         tree,
@@ -278,9 +637,20 @@ fn run_scan(
             bytes_scanned: progress.bytes_scanned,
             scan_mode: actual_mode,
             fallback_reason,
-            duration_ms: progress.duration_ms,
+            duration_ms: total_ms,
+            timings: ScanTimings {
+                scan_ms,
+                aggregate_ms,
+                largest_files_ms,
+                store_ms: 0,
+                total_ms,
+            },
         },
     ))
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
 }
 
 fn plan_elevated_prepare_result(probe_result: Result<(), FallbackReason>) -> PrepareScanResult {
@@ -503,6 +873,24 @@ mod tests {
     }
 
     #[test]
+    fn child_pages_are_sorted_and_paginated() {
+        let mut tree = FileTree::with_root("C:\\");
+        let folder = dir_entry(&mut tree, "folder");
+        let file_a = file_entry(&mut tree, "a.bin", 10);
+        let file_b = file_entry(&mut tree, "b.bin", 5);
+        tree.attach_child(tree.root_id(), file_b);
+        tree.attach_child(tree.root_id(), file_a);
+        tree.attach_child(tree.root_id(), folder);
+
+        let page = tree.get_children_page(tree.root_id(), 1, 1);
+
+        assert_eq!(page.total, 3);
+        assert_eq!(page.next_offset, Some(2));
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].name, "a.bin");
+    }
+
+    #[test]
     fn largest_files_are_sorted_and_paginated() {
         let mut tree = FileTree::with_root("C:\\");
         let file_a = file_entry(&mut tree, "a.bin", 10);
@@ -530,6 +918,25 @@ mod tests {
         tree.attach_child(folder, file);
 
         assert_eq!(tree.get_full_path(file), "C:\\folder\\file.txt");
+    }
+
+    #[test]
+    fn file_path_rows_return_only_requested_ids() {
+        let mut tree = FileTree::with_root("C:\\");
+        let folder = dir_entry(&mut tree, "folder");
+        let file_a = file_entry(&mut tree, "a.txt", 5);
+        let file_b = file_entry(&mut tree, "b.txt", 6);
+        tree.attach_child(tree.root_id(), folder);
+        tree.attach_child(folder, file_a);
+        tree.attach_child(folder, file_b);
+
+        let rows = tree.get_file_paths(&[file_b, 999, file_a]);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, file_b);
+        assert_eq!(rows[0].path, "C:\\folder\\b.txt");
+        assert_eq!(rows[1].id, file_a);
+        assert_eq!(rows[1].path, "C:\\folder\\a.txt");
     }
 
     #[test]
@@ -576,6 +983,84 @@ mod tests {
             result.fallback_reason,
             Some(FallbackReason::MftProbeTimeout)
         );
+    }
+
+    #[test]
+    fn treemap_inputs_group_the_overflow_tail() {
+        let mut tree = FileTree::with_root("C:\\");
+        let file_a = file_entry(&mut tree, "a.bin", 100);
+        let file_b = file_entry(&mut tree, "b.bin", 80);
+        let file_c = file_entry(&mut tree, "c.bin", 20);
+        tree.attach_child(tree.root_id(), file_c);
+        tree.attach_child(tree.root_id(), file_b);
+        tree.attach_child(tree.root_id(), file_a);
+
+        let inputs = build_treemap_inputs(&tree, tree.root_id(), 2);
+
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].label, "a.bin");
+        assert_eq!(inputs[0].kind, LayoutRectKind::Node);
+        assert_eq!(inputs[1].label, "Other");
+        assert_eq!(inputs[1].kind, LayoutRectKind::Overflow);
+        assert_eq!(inputs[1].value, 100);
+    }
+
+    #[test]
+    fn treemap_layout_recurses_into_large_directories() {
+        let mut tree = FileTree::with_root("C:\\");
+        let folder = dir_entry(&mut tree, "folder");
+        let nested_a = file_entry(&mut tree, "nested-a.bin", 70);
+        let nested_b = file_entry(&mut tree, "nested-b.bin", 30);
+        let sibling = file_entry(&mut tree, "sibling.bin", 10);
+
+        tree.attach_child(tree.root_id(), sibling);
+        tree.attach_child(tree.root_id(), folder);
+        tree.attach_child(folder, nested_a);
+        tree.attach_child(folder, nested_b);
+        tree.aggregate_sizes();
+
+        let layout = build_recursive_treemap(
+            &tree,
+            tree.root_id(),
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 800.0,
+                h: 600.0,
+            },
+            16,
+        );
+
+        assert!(layout.iter().any(|rect| rect.id == Some(folder)));
+        assert!(layout.iter().any(|rect| rect.id == Some(nested_a)));
+        assert!(layout.iter().any(|rect| rect.id == Some(nested_b)));
+    }
+
+    #[test]
+    fn treemap_cache_returns_scaled_layout_for_the_same_bucket() {
+        let key = LayoutCacheKey {
+            root_id: 1,
+            width_bucket: dimension_bucket(401.0),
+            height_bucket: dimension_bucket(401.0),
+        };
+        let mut cache = TreemapLayoutCache::new(4);
+        let cached_layout = vec![LayoutRect {
+            id: Some(7),
+            kind: LayoutRectKind::Node,
+            label: "node".to_string(),
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 100.0,
+        }];
+        cache.insert(key.clone(), 400.0, 400.0, cached_layout);
+
+        let layout = cache.get(&key, 416.0, 416.0).unwrap();
+
+        assert_eq!(layout.len(), 1);
+        assert_eq!(layout[0].label, "node");
+        assert!((layout[0].w - 208.0).abs() < 0.1);
+        assert!((layout[0].h - 104.0).abs() < 0.1);
     }
 
     #[test]

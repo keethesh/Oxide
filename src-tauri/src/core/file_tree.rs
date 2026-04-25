@@ -1,5 +1,6 @@
 use super::arena::StringArena;
 use super::file_entry::{FileEntry, FileFlags};
+use rayon::prelude::*;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -7,6 +8,7 @@ pub struct NodeSummary {
     pub id: u32,
     pub name: String,
     pub is_dir: bool,
+    pub is_hidden: bool,
     pub size: u64,
     pub child_count: u32,
 }
@@ -16,8 +18,21 @@ pub struct FileRow {
     pub id: u32,
     pub name: String,
     pub size: u64,
-    pub path: String,
     pub parent_id: u32,
+    pub is_hidden: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ChildPage {
+    pub items: Vec<NodeSummary>,
+    pub total: usize,
+    pub next_offset: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FilePathRow {
+    pub id: u32,
+    pub path: String,
 }
 
 #[derive(Default, Serialize)]
@@ -113,14 +128,14 @@ impl FileTree {
     }
 
     pub fn rebuild_largest_files(&mut self) {
-        let mut largest_files = Vec::new();
+        let mut largest_files = Vec::with_capacity(self.entries.len().saturating_sub(1));
         for (index, entry) in self.entries.iter().enumerate() {
             if index != self.root_id() as usize && !entry.is_dir() && entry.size > 0 {
                 largest_files.push(index as u32);
             }
         }
 
-        largest_files.sort_by(|a, b| {
+        largest_files.par_sort_unstable_by(|a, b| {
             self.entries[*b as usize]
                 .size
                 .cmp(&self.entries[*a as usize].size)
@@ -145,9 +160,13 @@ impl FileTree {
         (id as usize) < self.entries.len()
     }
 
-    pub fn get_children(&self, id: u32) -> Vec<NodeSummary> {
-        if !self.has_node(id) {
-            return Vec::new();
+    pub fn get_children_page(&self, id: u32, offset: usize, limit: usize) -> ChildPage {
+        if !self.has_node(id) || limit == 0 {
+            return ChildPage {
+                items: Vec::new(),
+                total: 0,
+                next_offset: None,
+            };
         }
 
         let mut children = Vec::new();
@@ -155,24 +174,51 @@ impl FileTree {
 
         while child_idx != FileEntry::NULL_INDEX {
             let entry = &self.entries[child_idx as usize];
-            children.push(NodeSummary {
+            children.push(ChildCandidate {
                 id: child_idx,
-                name: self.display_name(child_idx),
                 is_dir: entry.is_dir(),
+                is_hidden: entry.is_hidden(),
                 size: entry.size,
-                child_count: self.child_count(child_idx),
+                has_children: entry.first_child_index != FileEntry::NULL_INDEX,
             });
             child_idx = entry.next_sibling_index;
         }
 
-        children.sort_by(|a, b| {
-            b.is_dir
-                .cmp(&a.is_dir)
-                .then_with(|| b.size.cmp(&a.size))
-                .then_with(|| a.name.cmp(&b.name))
-        });
+        sort_child_candidates(&mut children);
 
-        children
+        let total = children.len();
+        if offset >= total {
+            return ChildPage {
+                items: Vec::new(),
+                total,
+                next_offset: None,
+            };
+        }
+
+        let items: Vec<NodeSummary> = children
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|child| NodeSummary {
+                id: child.id,
+                name: self.display_name(child.id),
+                is_dir: child.is_dir,
+                is_hidden: child.is_hidden,
+                size: child.size,
+                child_count: u32::from(child.has_children),
+            })
+            .collect();
+        let next_offset = (offset + items.len() < total).then_some(offset + items.len());
+
+        ChildPage {
+            items,
+            total,
+            next_offset,
+        }
+    }
+
+    pub fn get_children(&self, id: u32) -> Vec<NodeSummary> {
+        self.get_children_page(id, 0, usize::MAX).items
     }
 
     pub fn get_file_path(&self, id: u32) -> Vec<(u32, String)> {
@@ -236,8 +282,8 @@ impl FileTree {
                 id: file_id,
                 name: self.display_name(file_id),
                 size: entry.size,
-                path: self.get_full_path(file_id),
                 parent_id: entry.parent_index,
+                is_hidden: entry.is_hidden(),
             });
             if rows.len() == limit {
                 break;
@@ -247,7 +293,24 @@ impl FileTree {
         rows
     }
 
-    fn display_name(&self, id: u32) -> String {
+    pub fn get_file_paths(&self, file_ids: &[u32]) -> Vec<FilePathRow> {
+        let mut rows = Vec::with_capacity(file_ids.len());
+
+        for &id in file_ids {
+            if !self.has_node(id) {
+                continue;
+            }
+
+            rows.push(FilePathRow {
+                id,
+                path: self.get_full_path(id),
+            });
+        }
+
+        rows
+    }
+
+    pub fn display_name(&self, id: u32) -> String {
         if id == self.root_id() {
             return self.get_node_name(id).trim_end_matches('\\').to_string();
         }
@@ -270,4 +333,22 @@ impl FileTree {
         }
         false
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChildCandidate {
+    id: u32,
+    is_dir: bool,
+    is_hidden: bool,
+    size: u64,
+    has_children: bool,
+}
+
+fn sort_child_candidates(children: &mut [ChildCandidate]) {
+    children.sort_unstable_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| b.size.cmp(&a.size))
+            .then_with(|| a.id.cmp(&b.id))
+    });
 }

@@ -36,6 +36,14 @@ export interface ScanProgress {
   duration_ms: number;
 }
 
+export interface ScanTimings {
+  scan_ms: number;
+  aggregate_ms: number;
+  largest_files_ms: number;
+  store_ms: number;
+  total_ms: number;
+}
+
 export interface ScanResult {
   root_id: number;
   drive_letter: string;
@@ -45,20 +53,45 @@ export interface ScanResult {
   scan_mode: ScanMode;
   fallback_reason: FallbackReason | null;
   duration_ms: number;
+  timings: ScanTimings;
 }
 
 export interface NodeSummary {
   id: number;
   name: string;
   is_dir: boolean;
+  is_hidden: boolean;
   size: number;
   child_count: number;
+}
+
+export interface ChildPage {
+  items: NodeSummary[];
+  total: number;
+  next_offset: number | null;
 }
 
 export interface FileRow {
   id: number;
   name: string;
   size: number;
-  path: string;
   parent_id: number;
+  is_hidden: boolean;
+}
+
+export interface FilePathRow {
+  id: number;
+  path: string;
+}
+
+export type TreemapRectKind = "node" | "overflow";
+
+export interface TreemapRect {
+  id: number | null;
+  kind: TreemapRectKind;
+  label: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
