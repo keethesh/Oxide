@@ -5,16 +5,20 @@
 
   const LABEL_MIN_WIDTH = 72;
   const LABEL_MIN_HEIGHT = 22;
-  const HOVER_BORDER = "#fff7eb";
+  const HOVER_BORDER = "#dff59a";
   const TREEMAP_COLORS = [
-    [88, 56, 48],
-    [102, 68, 47],
-    [67, 82, 57],
-    [52, 91, 83],
-    [92, 76, 123],
-    [121, 78, 61],
-    [118, 113, 69],
-    [72, 103, 119]
+    [45, 74, 62],
+    [61, 90, 78],
+    [74, 107, 92],
+    [90, 74, 62],
+    [107, 90, 78],
+    [74, 74, 90],
+    [90, 90, 106],
+    [62, 74, 90],
+    [90, 74, 90],
+    [74, 90, 74],
+    [90, 106, 90],
+    [121, 78, 61]
   ];
 
   let {
@@ -275,12 +279,13 @@
     width: 100%;
     height: 100%;
     background:
-      linear-gradient(135deg, rgba(255, 252, 239, 0.045), transparent),
+      linear-gradient(135deg, rgba(223, 245, 154, 0.035), transparent 42%),
       #10130f;
     overflow: hidden;
     position: relative;
-    border: 1px solid rgba(238, 232, 219, 0.12);
-    border-radius: 10px;
+    border: 1px solid rgba(223, 245, 154, 0.08);
+    border-radius: 12px;
+    box-shadow: inset 0 0 0 1px rgba(255, 252, 239, 0.018);
   }
 
   .overlay {
@@ -288,7 +293,7 @@
     top: 1rem;
     left: 1rem;
     z-index: 1;
-    border: 1px solid rgba(238, 232, 219, 0.13);
+    border: 1px solid rgba(223, 245, 154, 0.12);
     border-radius: 8px;
     background: rgba(15, 18, 14, 0.86);
     padding: 0.45rem 0.8rem;
@@ -313,7 +318,7 @@
     display: grid;
     gap: 0.2rem;
     max-width: min(24rem, calc(100% - 2rem));
-    border: 1px solid rgba(238, 232, 219, 0.16);
+    border: 1px solid rgba(223, 245, 154, 0.14);
     border-radius: 10px;
     background: rgba(15, 18, 14, 0.9);
     box-shadow: 0 18px 46px rgba(0, 0, 0, 0.28);

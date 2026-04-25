@@ -307,7 +307,7 @@
   .file-list {
     display: flex;
     flex-direction: column;
-    gap: 0.7rem;
+    gap: 0.75rem;
     width: 100%;
     height: 100%;
     color: #ebe4d8;
@@ -328,8 +328,11 @@
   }
 
   .heading h2 {
-    font-size: 0.9rem;
+    font-size: 0.74rem;
     color: #fbf6eb;
+    font-weight: 850;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
   }
 
   .heading p,
@@ -347,12 +350,12 @@
     flex-direction: column;
     min-height: 0;
     flex: 1;
-    border: 1px solid rgba(238, 232, 219, 0.1);
-    border-radius: 10px;
+    border: 1px solid rgba(223, 245, 154, 0.08);
+    border-radius: 8px;
     overflow: hidden;
     background:
-      linear-gradient(180deg, rgba(255, 252, 239, 0.035), transparent),
-      #121611;
+      linear-gradient(180deg, rgba(223, 245, 154, 0.028), transparent),
+      oklch(20% 0.018 125);
   }
 
   .table-head,
@@ -367,7 +370,7 @@
 
   .table-head {
     min-height: 36px;
-    border-bottom: 1px solid rgba(238, 232, 219, 0.1);
+    border-bottom: 1px solid rgba(223, 245, 154, 0.08);
     color: #a8a094;
     font-size: 0.72rem;
     font-weight: 800;
@@ -391,12 +394,12 @@
     position: absolute;
     left: 0;
     right: 0;
-    border-bottom: 1px solid rgba(238, 232, 219, 0.06);
+    border-bottom: 1px solid rgba(223, 245, 154, 0.045);
     transition: background 140ms cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .row:hover {
-    background: rgba(238, 232, 219, 0.045);
+    background: oklch(24% 0.019 125);
   }
 
   .name-cell {
