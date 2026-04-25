@@ -298,6 +298,14 @@
     currentFallbackReason ? fallbackDescription(currentFallbackReason) : ""
   );
   const profileSummary = $derived(formatProfile(scanResult));
+  const totalItemsScanned = $derived(progress.files_scanned + progress.dirs_scanned);
+  const scanActivityLabel = $derived(
+    isScanning
+      ? `${totalItemsScanned.toLocaleString()} entries indexed`
+      : scanResult
+        ? `${(scanResult.files_scanned + scanResult.dirs_scanned).toLocaleString()} entries mapped`
+        : "Ready"
+  );
 </script>
 
 <svelte:head>
@@ -307,8 +315,11 @@
 <main class="shell">
   <header class="topbar">
     <div class="brand">
-      <strong>Oxide</strong>
-      <span>NTFS disk analyzer</span>
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-copy">
+        <strong>Oxide</strong>
+        <span>NTFS disk analyzer</span>
+      </span>
     </div>
 
     <div class="scan-strip">
@@ -328,12 +339,16 @@
         disabled={!selectedDriveInfo?.supported || isScanning || drivesLoading}
         onclick={() => scan()}
       >
-        {isScanning ? "Scanning" : "Scan"}
+        <span>{isScanning ? "Scanning" : "Scan drive"}</span>
       </button>
     </div>
   </header>
 
   <section class="status-rail">
+    <div class:active={isScanning} class="scan-orb" aria-hidden="true">
+      <span></span>
+    </div>
+
     <div class="status-copy">
       <span class="status-kicker">{progress.phase}</span>
       <strong>{status}</strong>
@@ -361,6 +376,10 @@
         <strong>{visibleDurationLabel}</strong>
       </div>
     </div>
+
+    <div class:active={isScanning} class="activity-line" aria-label={scanActivityLabel}>
+      <span></span>
+    </div>
   </section>
 
   {#if drivesLoading}
@@ -379,24 +398,18 @@
     </section>
   {:else if scanResult}
     <div class="workspace">
-      <aside class="navigator" aria-label="Folder navigator">
-        <TreeView
-          scanLoaded={true}
-          scanRootId={scanResult.root_id}
-          selectedId={rootId}
-          onSelect={handleNavigate}
-        />
-      </aside>
-
       <section class="visual-stage" aria-label="Disk visualization">
         <div class="stage-toolbar">
-          <div class="breadcrumb">
-            {#each breadcrumbPath as [id, name], index (id)}
-              {#if index > 0}
-                <span class="sep">/</span>
-              {/if}
-              <button class="bc-item" onclick={() => (rootId = id)}>{name}</button>
-            {/each}
+          <div class="stage-context">
+            <span>{activeTab === "treemap" ? "Space map" : "Largest files"}</span>
+            <div class="breadcrumb">
+              {#each breadcrumbPath as [id, name], index (id)}
+                {#if index > 0}
+                  <span class="sep">/</span>
+                {/if}
+                <button class="bc-item" onclick={() => (rootId = id)}>{name}</button>
+              {/each}
+            </div>
           </div>
 
           <nav class="view-tabs" aria-label="View mode">
@@ -418,14 +431,49 @@
         </div>
       </section>
 
-      <aside class="inspector" aria-label="Largest files">
-        <FileList scanLoaded={true} {rootId} onNavigate={handleNavigate} />
+      <aside class="analysis-rail" aria-label="Disk analysis tools">
+        <section class="navigator" aria-label="Folder navigator">
+          <TreeView
+            scanLoaded={true}
+            scanRootId={scanResult.root_id}
+            selectedId={rootId}
+            onSelect={handleNavigate}
+          />
+        </section>
+
+        <section class="inspector" aria-label="Largest files">
+          <FileList scanLoaded={true} {rootId} onNavigate={handleNavigate} />
+        </section>
       </aside>
     </div>
   {:else}
-    <section class="empty-state start">
-      <strong>Choose a drive to inspect.</strong>
-      <span>Oxide will map the folder tree, render a treemap, and keep the largest files close at hand.</span>
+    <section class="start-board">
+      <div class="start-copy">
+        <span class="empty-mark" aria-hidden="true"></span>
+        <div>
+          <strong>Choose a drive to inspect.</strong>
+          <span>Oxide opens with a map-first workspace so storage pressure is visible before you start drilling into folders.</span>
+        </div>
+      </div>
+
+      <div class="drive-board" aria-label="Available drives">
+        {#each drives as drive}
+          <button
+            class:selected={selectedDrive === drive.letter}
+            class:unsupported={!drive.supported}
+            disabled={!drive.supported || isScanning}
+            onclick={() => {
+              selectedDrive = drive.letter;
+            }}
+          >
+            <span>
+              <strong>{drive.letter}</strong>
+              <small>{drive.label}</small>
+            </span>
+            <em>{drive.supported ? drive.filesystem : `${drive.filesystem} unsupported`}</em>
+          </button>
+        {/each}
+      </div>
     </section>
   {/if}
 </main>
@@ -435,9 +483,11 @@
     margin: 0;
     padding: 0;
     min-height: 100vh;
-    background: #111312;
-    color: #ece8df;
-    font-family: "Aptos", "Segoe UI", sans-serif;
+    background:
+      radial-gradient(circle at 18% 8%, rgba(159, 175, 119, 0.22), transparent 24rem),
+      linear-gradient(135deg, #151712 0%, #0e1210 44%, #15110f 100%);
+    color: #f1ece2;
+    font-family: "Segoe UI Variable", "Aptos", "Segoe UI", sans-serif;
   }
 
   :global(button),
@@ -445,20 +495,31 @@
     font: inherit;
   }
 
+  :global(button:focus-visible),
+  :global(select:focus-visible) {
+    outline: 2px solid #dff59a;
+    outline-offset: 2px;
+  }
+
   .shell {
-    --panel: #181b19;
-    --panel-strong: #20231f;
-    --line: #313730;
-    --line-soft: rgba(236, 232, 223, 0.09);
-    --text-muted: #a8a094;
-    --accent: #d7ff6f;
-    --accent-ink: #1c220b;
-    --warn: #ffb199;
+    --panel: oklch(20% 0.018 125);
+    --panel-raised: oklch(24% 0.019 125);
+    --panel-strong: oklch(27% 0.02 115);
+    --line: rgba(238, 232, 219, 0.13);
+    --line-strong: rgba(238, 232, 219, 0.22);
+    --line-soft: rgba(238, 232, 219, 0.075);
+    --text-muted: #aaa397;
+    --text-soft: #d6cfc1;
+    --accent: #dff59a;
+    --accent-2: #f2b16f;
+    --accent-ink: #20240c;
+    --warn: #ffb299;
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
     display: grid;
     grid-template-rows: auto auto minmax(0, 1fr);
-    gap: 10px;
+    gap: 12px;
     height: 100vh;
-    padding: 10px;
+    padding: 12px;
     box-sizing: border-box;
   }
 
@@ -466,7 +527,7 @@
   .status-rail,
   .workspace {
     border: 1px solid var(--line);
-    background: var(--panel);
+    box-shadow: 0 20px 70px rgba(0, 0, 0, 0.22);
   }
 
   .topbar {
@@ -474,25 +535,46 @@
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
-    min-height: 58px;
-    padding: 8px 10px 8px 14px;
+    min-height: 64px;
+    padding: 10px 12px 10px 14px;
+    border-radius: 10px;
+    background:
+      linear-gradient(180deg, rgba(255, 252, 239, 0.055), transparent),
+      var(--panel);
     box-sizing: border-box;
   }
 
   .brand {
     display: flex;
-    align-items: baseline;
-    gap: 10px;
+    align-items: center;
+    gap: 12px;
     min-width: 10rem;
   }
 
-  .brand strong {
-    color: #f6f2e9;
-    font-size: 1.15rem;
-    letter-spacing: 0;
+  .brand-mark {
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgba(223, 245, 154, 0.5);
+    border-radius: 8px;
+    background:
+      linear-gradient(135deg, rgba(223, 245, 154, 0.95), rgba(242, 177, 111, 0.85)),
+      #dff59a;
+    box-shadow: inset 0 0 0 6px rgba(21, 23, 18, 0.18), 0 10px 25px rgba(223, 245, 154, 0.18);
   }
 
-  .brand span,
+  .brand-copy {
+    display: grid;
+    gap: 1px;
+  }
+
+  .brand strong {
+    color: #fbf6eb;
+    font-size: 1.08rem;
+    letter-spacing: 0;
+    line-height: 1;
+  }
+
+  .brand-copy span,
   .drive-picker span,
   .status-copy span,
   .metrics span {
@@ -504,15 +586,16 @@
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    gap: 8px;
+    gap: 10px;
     min-width: min(42rem, 60vw);
   }
 
   .drive-picker {
+    position: relative;
     display: grid;
-    grid-template-columns: auto minmax(14rem, 26rem);
+    grid-template-columns: auto minmax(14rem, 27rem);
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     min-width: 0;
     flex: 1;
   }
@@ -521,21 +604,53 @@
     min-width: 0;
     width: 100%;
     border: 1px solid var(--line);
-    border-radius: 6px;
-    background: #111312;
-    color: #ece8df;
-    padding: 0.55rem 0.65rem;
+    border-radius: 8px;
+    background: #111511;
+    color: #f1ece2;
+    padding: 0.66rem 0.75rem;
+    transition: border-color 180ms var(--ease), background 180ms var(--ease), transform 180ms var(--ease);
+  }
+
+  select:hover:not(:disabled) {
+    border-color: var(--line-strong);
+    background: #151a14;
   }
 
   .scan-button {
-    min-width: 5.75rem;
-    border: 1px solid color-mix(in srgb, var(--accent), #111312 35%);
-    border-radius: 6px;
-    background: var(--accent);
+    position: relative;
+    min-width: 7.25rem;
+    overflow: hidden;
+    border: 1px solid color-mix(in oklch, var(--accent), #111312 35%);
+    border-radius: 8px;
+    background: linear-gradient(180deg, #efffb6, var(--accent));
     color: var(--accent-ink);
     cursor: pointer;
     font-weight: 800;
-    padding: 0.58rem 0.9rem;
+    padding: 0.69rem 1rem;
+    transition: transform 180ms var(--ease), box-shadow 180ms var(--ease), filter 180ms var(--ease);
+  }
+
+  .scan-button::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(110deg, transparent, rgba(255, 255, 255, 0.36), transparent);
+    transform: translateX(-120%);
+    transition: transform 600ms var(--ease);
+  }
+
+  .scan-button:hover:not(:disabled) {
+    box-shadow: 0 12px 34px rgba(223, 245, 154, 0.2);
+    filter: saturate(1.04);
+    transform: translateY(-1px);
+  }
+
+  .scan-button:hover:not(:disabled)::after {
+    transform: translateX(120%);
+  }
+
+  .scan-button:active:not(:disabled) {
+    transform: translateY(0);
   }
 
   .scan-button:disabled,
@@ -545,25 +660,55 @@
   }
 
   .status-rail {
+    position: relative;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    gap: 12px;
-    min-height: 74px;
-    padding: 10px 14px;
+    gap: 14px;
+    min-height: 84px;
+    overflow: hidden;
+    border-radius: 12px;
+    background:
+      linear-gradient(180deg, rgba(255, 252, 239, 0.045), transparent),
+      var(--panel-raised);
+    padding: 12px 15px;
     box-sizing: border-box;
+  }
+
+  .scan-orb {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    border-radius: 10px;
+    background: #151914;
+    border: 1px solid var(--line);
+  }
+
+  .scan-orb span {
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    background: var(--text-muted);
+    box-shadow: 0 0 0 6px rgba(238, 232, 219, 0.04);
+  }
+
+  .scan-orb.active span {
+    background: var(--accent);
+    animation: pulse 1.4s var(--ease) infinite;
   }
 
   .status-copy {
     display: grid;
-    gap: 3px;
+    gap: 4px;
     min-width: 0;
   }
 
   .status-copy strong {
     overflow: hidden;
-    color: #f6f2e9;
-    font-size: 1rem;
+    color: #fbf6eb;
+    font-size: clamp(1rem, 1.4vw, 1.22rem);
+    font-weight: 720;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -576,53 +721,88 @@
 
   .status-kicker {
     color: var(--accent) !important;
+    font-weight: 800;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
   }
 
   .metrics {
     display: grid;
     grid-template-columns: repeat(4, minmax(6.5rem, auto));
-    gap: 1px;
+    gap: 0;
     overflow: hidden;
-    border: 1px solid var(--line-soft);
-    background: var(--line-soft);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: #151914;
   }
 
   .metrics div {
     display: grid;
-    gap: 2px;
+    gap: 3px;
     min-width: 0;
-    background: #151715;
-    padding: 8px 10px;
+    padding: 9px 12px;
+    border-right: 1px solid var(--line-soft);
+  }
+
+  .metrics div:last-child {
+    border-right: none;
   }
 
   .metrics strong {
     overflow: hidden;
-    color: #f6f2e9;
-    font-size: 0.95rem;
+    color: #fbf6eb;
+    font-size: 1rem;
+    font-variant-numeric: tabular-nums;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
+  .activity-line {
+    position: absolute;
+    right: 14px;
+    bottom: 0;
+    left: 14px;
+    height: 2px;
+    overflow: hidden;
+    background: rgba(238, 232, 219, 0.08);
+  }
+
+  .activity-line span {
+    display: block;
+    width: 38%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, var(--accent), var(--accent-2), transparent);
+    transform: translateX(-100%);
+  }
+
+  .activity-line.active span {
+    animation: scan-line 1.45s var(--ease) infinite;
+  }
+
   .workspace {
     display: grid;
-    grid-template-columns: minmax(16rem, 22rem) minmax(0, 1fr) minmax(20rem, 28rem);
+    grid-template-columns: minmax(0, 1fr) minmax(23rem, 30rem);
     gap: 1px;
     min-height: 0;
     overflow: hidden;
+    border-radius: 12px;
     background: var(--line);
   }
 
   .navigator,
   .visual-stage,
-  .inspector {
+  .inspector,
+  .analysis-rail {
     background: var(--panel);
     min-height: 0;
   }
 
-  .navigator,
-  .inspector {
-    overflow: auto;
+  .analysis-rail {
+    display: grid;
+    grid-template-rows: minmax(15rem, 1.08fr) minmax(15rem, 0.92fr);
+    gap: 1px;
+    overflow: hidden;
+    background: var(--line);
   }
 
   .visual-stage {
@@ -636,10 +816,25 @@
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-    min-height: 48px;
-    padding: 7px 8px 7px 12px;
+    min-height: 54px;
+    padding: 8px 10px 8px 14px;
     border-bottom: 1px solid var(--line);
     box-sizing: border-box;
+    background: linear-gradient(180deg, rgba(255, 252, 239, 0.035), transparent);
+  }
+
+  .stage-context {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .stage-context > span {
+    color: var(--accent);
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
 
   .breadcrumb {
@@ -654,7 +849,7 @@
   .view-tabs button {
     border: none;
     background: transparent;
-    color: #e8e1d6;
+    color: #e9e1d5;
     cursor: pointer;
   }
 
@@ -662,11 +857,14 @@
     max-width: 12rem;
     overflow: hidden;
     padding: 0.25rem 0.35rem;
+    border-radius: 6px;
     text-overflow: ellipsis;
     white-space: nowrap;
+    transition: color 160ms var(--ease), background 160ms var(--ease);
   }
 
   .bc-item:hover {
+    background: rgba(223, 245, 154, 0.08);
     color: var(--accent);
   }
 
@@ -677,22 +875,28 @@
   .view-tabs {
     display: flex;
     align-items: center;
-    gap: 1px;
+    gap: 2px;
     overflow: hidden;
     border: 1px solid var(--line);
-    border-radius: 6px;
-    background: var(--line);
+    border-radius: 8px;
+    background: #121611;
     flex-shrink: 0;
+    padding: 2px;
   }
 
   .view-tabs button {
-    background: #151715;
+    border-radius: 6px;
     color: var(--text-muted);
-    padding: 0.42rem 0.7rem;
+    padding: 0.48rem 0.78rem;
+    transition: color 160ms var(--ease), background 160ms var(--ease);
+  }
+
+  .view-tabs button:hover {
+    color: #f6f0e5;
   }
 
   .view-tabs button.active {
-    background: #e7edda;
+    background: #e6edd6;
     color: #151715;
     font-weight: 800;
   }
@@ -701,7 +905,7 @@
     flex: 1;
     min-height: 0;
     display: flex;
-    padding: 8px;
+    padding: 10px;
     overflow: hidden;
   }
 
@@ -712,26 +916,179 @@
   .empty-state {
     display: grid;
     place-content: center;
-    gap: 8px;
+    gap: 10px;
     min-height: 0;
-    border: 1px dashed var(--line);
-    background: var(--panel);
+    border: 1px dashed var(--line-strong);
+    border-radius: 12px;
+    background:
+      linear-gradient(180deg, rgba(255, 252, 239, 0.045), transparent),
+      var(--panel);
     color: var(--text-muted);
     padding: 2rem;
     text-align: center;
   }
 
-  .empty-state strong {
-    color: #f6f2e9;
+  .start-board {
+    display: grid;
+    grid-template-columns: minmax(18rem, 0.9fr) minmax(20rem, 1.1fr);
+    gap: 1px;
+    min-height: 0;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--line);
+    box-shadow: 0 20px 70px rgba(0, 0, 0, 0.22);
+  }
+
+  .start-copy,
+  .drive-board {
+    min-height: 0;
+    background:
+      linear-gradient(180deg, rgba(255, 252, 239, 0.045), transparent),
+      var(--panel);
+  }
+
+  .start-copy {
+    display: grid;
+    align-content: center;
+    gap: 18px;
+    padding: clamp(1.25rem, 4vw, 3rem);
+  }
+
+  .start-copy div {
+    display: grid;
+    gap: 0.5rem;
+    max-width: 32rem;
+  }
+
+  .start-copy strong {
+    color: #fbf6eb;
+    font-size: clamp(1.55rem, 3vw, 2.7rem);
+    line-height: 1.02;
+  }
+
+  .start-copy span:not(.empty-mark) {
+    color: var(--text-muted);
+    line-height: 1.55;
+  }
+
+  .drive-board {
+    display: grid;
+    align-content: start;
+    gap: 10px;
+    overflow: auto;
+    padding: clamp(1rem, 2.4vw, 1.5rem);
+  }
+
+  .drive-board button {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    min-height: 74px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: #121611;
+    color: #ebe4d8;
+    cursor: pointer;
+    padding: 0.9rem 1rem;
+    text-align: left;
+    transition: border-color 180ms var(--ease), background 180ms var(--ease), transform 180ms var(--ease);
+  }
+
+  .drive-board button:hover:not(:disabled),
+  .drive-board button.selected {
+    border-color: rgba(223, 245, 154, 0.46);
+    background: linear-gradient(90deg, rgba(223, 245, 154, 0.12), rgba(242, 177, 111, 0.04));
+    transform: translateY(-1px);
+  }
+
+  .drive-board button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  .drive-board button span {
+    display: grid;
+    gap: 0.2rem;
+    min-width: 0;
+  }
+
+  .drive-board button strong {
+    color: #fbf6eb;
+    font-size: 1.18rem;
+  }
+
+  .drive-board small,
+  .drive-board em {
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    font-style: normal;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .drive-board em {
+    flex-shrink: 0;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0.25rem 0.55rem;
+  }
+
+  .drive-board button.selected em {
+    border-color: rgba(223, 245, 154, 0.35);
+    color: var(--accent);
+  }
+
+  .empty-mark {
+    width: 62px;
+    height: 62px;
+    justify-self: center;
+    border-radius: 16px;
+    background:
+      linear-gradient(90deg, transparent 48%, rgba(21, 23, 18, 0.24) 48% 52%, transparent 52%),
+      linear-gradient(0deg, transparent 48%, rgba(21, 23, 18, 0.24) 48% 52%, transparent 52%),
+      linear-gradient(135deg, #dff59a, #f2b16f);
+    box-shadow: 0 18px 42px rgba(0, 0, 0, 0.24);
+  }
+
+  @keyframes pulse {
+    0%,
+    100% {
+      box-shadow: 0 0 0 6px rgba(223, 245, 154, 0.08);
+    }
+    50% {
+      box-shadow: 0 0 0 11px rgba(223, 245, 154, 0.16);
+    }
+  }
+
+  @keyframes scan-line {
+    to {
+      transform: translateX(265%);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 
   @media (max-width: 1180px) {
     .workspace {
-      grid-template-columns: minmax(15rem, 20rem) minmax(0, 1fr);
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(34rem, 1fr) minmax(18rem, 0.62fr);
     }
 
-    .inspector {
-      display: none;
+    .analysis-rail {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr);
     }
   }
 
@@ -766,9 +1123,23 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
+    .status-rail {
+      grid-template-columns: auto minmax(0, 1fr);
+    }
+
+    .metrics {
+      grid-column: 1 / -1;
+    }
+
     .workspace {
       grid-template-columns: 1fr;
-      grid-template-rows: minmax(12rem, 16rem) minmax(28rem, 1fr);
+      grid-template-rows: minmax(30rem, 1fr) minmax(30rem, 0.8fr);
+    }
+
+    .analysis-rail,
+    .start-board {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto auto;
     }
   }
 
@@ -780,8 +1151,7 @@
 
     .brand {
       align-items: flex-start;
-      flex-direction: column;
-      gap: 2px;
+      gap: 9px;
     }
 
     .metrics {

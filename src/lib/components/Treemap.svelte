@@ -6,6 +6,16 @@
   const LABEL_MIN_WIDTH = 72;
   const LABEL_MIN_HEIGHT = 22;
   const HOVER_BORDER = "#fff7eb";
+  const TREEMAP_COLORS = [
+    [88, 56, 48],
+    [102, 68, 47],
+    [67, 82, 57],
+    [52, 91, 83],
+    [92, 76, 123],
+    [121, 78, 61],
+    [118, 113, 69],
+    [72, 103, 119]
+  ];
 
   let {
     rootId = 0,
@@ -138,6 +148,16 @@
     }
   }
 
+  function colorFor(rect: TreemapRect, hovered: boolean) {
+    if (rect.kind === "overflow") {
+      return hovered ? "#74584f" : "#4d3934";
+    }
+
+    const source = TREEMAP_COLORS[Math.abs(rect.id ?? 0) % TREEMAP_COLORS.length];
+    const lift = hovered ? 24 : 0;
+    return `rgb(${Math.min(source[0] + lift, 255)} ${Math.min(source[1] + lift, 255)} ${Math.min(source[2] + lift, 255)})`;
+  }
+
   function render() {
     if (!ctx) {
       return;
@@ -148,16 +168,12 @@
 
     for (const rect of layout) {
       const isHovered = sameRect(rect, hoveredRect);
-      const fill = rect.kind === "overflow"
-        ? isHovered
-          ? "#6a554d"
-          : "#4d3a34"
-        : `hsl(${((rect.id ?? 0) * 137.5) % 360}, 54%, ${isHovered ? 56 : 42}%)`;
+      const fill = colorFor(rect, isHovered);
 
       ctx.fillStyle = fill;
       ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
 
-      ctx.strokeStyle = isHovered ? HOVER_BORDER : "rgba(17, 17, 17, 0.45)";
+      ctx.strokeStyle = isHovered ? HOVER_BORDER : "rgba(12, 14, 12, 0.58)";
       ctx.lineWidth = isHovered ? 2 : 1;
       ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
 
@@ -166,8 +182,8 @@
         ctx.beginPath();
         ctx.rect(rect.x + 2, rect.y + 2, rect.w - 4, rect.h - 4);
         ctx.clip();
-        ctx.fillStyle = "rgba(255, 250, 244, 0.92)";
-        ctx.font = "12px 'Segoe UI', sans-serif";
+        ctx.fillStyle = "rgba(255, 250, 244, 0.94)";
+        ctx.font = "600 12px 'Segoe UI Variable', 'Segoe UI', sans-serif";
         ctx.textBaseline = "top";
         ctx.fillText(rect.label, rect.x + 8, rect.y + 6, Math.max(0, rect.w - 16));
         ctx.restore();
@@ -237,6 +253,13 @@
     <div class="overlay subtle">Small tiles grouped into Other</div>
   {/if}
 
+  {#if hoveredRect}
+    <div class="hover-card">
+      <span>{hoveredRect.kind === "overflow" ? "Grouped files" : "Open folder"}</span>
+      <strong>{hoveredRect.label}</strong>
+    </div>
+  {/if}
+
   <canvas
     bind:this={canvas}
     width={canvasWidth}
@@ -251,10 +274,13 @@
   .treemap-container {
     width: 100%;
     height: 100%;
-    background: #101210;
+    background:
+      linear-gradient(135deg, rgba(255, 252, 239, 0.045), transparent),
+      #10130f;
     overflow: hidden;
     position: relative;
-    border: 1px solid rgba(236, 232, 223, 0.08);
+    border: 1px solid rgba(238, 232, 219, 0.12);
+    border-radius: 10px;
   }
 
   .overlay {
@@ -262,11 +288,13 @@
     top: 1rem;
     left: 1rem;
     z-index: 1;
-    border-radius: 4px;
-    background: rgba(10, 10, 10, 0.72);
+    border: 1px solid rgba(238, 232, 219, 0.13);
+    border-radius: 8px;
+    background: rgba(15, 18, 14, 0.86);
     padding: 0.45rem 0.8rem;
-    color: #f6f2e9;
+    color: #fbf6eb;
     font-size: 0.82rem;
+    backdrop-filter: blur(12px);
   }
 
   .overlay.error {
@@ -277,9 +305,43 @@
     color: #a8a094;
   }
 
+  .hover-card {
+    position: absolute;
+    right: 1rem;
+    bottom: 1rem;
+    z-index: 1;
+    display: grid;
+    gap: 0.2rem;
+    max-width: min(24rem, calc(100% - 2rem));
+    border: 1px solid rgba(238, 232, 219, 0.16);
+    border-radius: 10px;
+    background: rgba(15, 18, 14, 0.9);
+    box-shadow: 0 18px 46px rgba(0, 0, 0, 0.28);
+    padding: 0.65rem 0.8rem;
+    pointer-events: none;
+    backdrop-filter: blur(12px);
+  }
+
+  .hover-card span {
+    color: #dff59a;
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .hover-card strong {
+    overflow: hidden;
+    color: #fbf6eb;
+    font-size: 0.9rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   canvas {
     display: block;
     width: 100%;
     height: 100%;
+    cursor: pointer;
   }
 </style>

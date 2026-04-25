@@ -4,7 +4,7 @@
   import type { ChildPage, NodeSummary } from "$lib/types";
 
   const PAGE_SIZE = 200;
-  const ROW_HEIGHT = 32;
+  const ROW_HEIGHT = 34;
   const OVERSCAN = 20;
 
   interface LoadedChildren {
@@ -391,10 +391,10 @@
   .tree-view {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.7rem;
     height: 100%;
-    padding: 0.65rem;
-    color: #e6e0d5;
+    padding: 0.8rem;
+    color: #ebe4d8;
     box-sizing: border-box;
   }
 
@@ -412,8 +412,9 @@
   }
 
   .heading h2 {
-    font-size: 0.88rem;
-    color: #f6f2e9;
+    font-size: 0.9rem;
+    color: #fbf6eb;
+    letter-spacing: 0;
   }
 
   .heading p,
@@ -431,8 +432,11 @@
     flex: 1;
     min-height: 0;
     overflow: auto;
-    border: 1px solid rgba(236, 232, 223, 0.08);
-    background: #121412;
+    border: 1px solid rgba(238, 232, 219, 0.1);
+    border-radius: 10px;
+    background:
+      linear-gradient(180deg, rgba(255, 252, 239, 0.035), transparent),
+      #121611;
   }
 
   .canvas {
@@ -448,12 +452,18 @@
     align-items: center;
     gap: 0.25rem;
     box-sizing: border-box;
-    border-bottom: 1px solid rgba(236, 232, 223, 0.05);
+    border-bottom: 1px solid rgba(238, 232, 219, 0.055);
+    transition: background 140ms cubic-bezier(0.16, 1, 0.3, 1), color 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .row:hover {
+    background: rgba(238, 232, 219, 0.045);
   }
 
   .row.selected {
-    background: rgba(215, 255, 111, 0.12);
-    color: #f6f2e9;
+    background:
+      linear-gradient(90deg, rgba(223, 245, 154, 0.16), rgba(223, 245, 154, 0.04));
+    color: #fbf6eb;
   }
 
   .row.hidden-row {
@@ -474,6 +484,12 @@
     padding: 0;
     color: #a8a094;
     flex-shrink: 0;
+    transition: color 140ms cubic-bezier(0.16, 1, 0.3, 1), transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .expander:hover:not(:disabled) {
+    color: #dff59a;
+    transform: scale(1.08);
   }
 
   .expander:disabled {
@@ -494,7 +510,7 @@
     gap: 0.75rem;
     width: 100%;
     background: transparent;
-    padding: 0.4rem 0.6rem 0.4rem 0;
+    padding: 0.45rem 0.65rem 0.45rem 0;
     text-align: left;
     font: inherit;
   }
@@ -512,6 +528,10 @@
     white-space: nowrap;
   }
 
+  .node:hover .name {
+    color: #fbf6eb;
+  }
+
   .badge {
     border: 1px solid rgba(255, 180, 155, 0.35);
     border-radius: 4px;
@@ -526,6 +546,7 @@
   .meta {
     color: #a8a094;
     font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
 
@@ -534,6 +555,12 @@
   }
 
   .load-more {
-    color: #d7ff6f;
+    color: #dff59a;
+    font-weight: 700;
+    transition: color 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .load-more:hover:not(:disabled) {
+    color: #f2b16f;
   }
 </style>

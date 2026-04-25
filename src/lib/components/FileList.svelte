@@ -4,7 +4,7 @@
   import type { FilePathRow, FileRow } from "$lib/types";
 
   const PAGE_SIZE = 200;
-  const ROW_HEIGHT = 40;
+  const ROW_HEIGHT = 42;
   const OVERSCAN = 15;
 
   let {
@@ -307,10 +307,10 @@
   .file-list {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.7rem;
     width: 100%;
     height: 100%;
-    color: #e6e0d5;
+    color: #ebe4d8;
     min-height: 0;
   }
 
@@ -328,8 +328,8 @@
   }
 
   .heading h2 {
-    font-size: 0.88rem;
-    color: #f6f2e9;
+    font-size: 0.9rem;
+    color: #fbf6eb;
   }
 
   .heading p,
@@ -347,26 +347,30 @@
     flex-direction: column;
     min-height: 0;
     flex: 1;
-    border: 1px solid rgba(236, 232, 223, 0.08);
+    border: 1px solid rgba(238, 232, 219, 0.1);
+    border-radius: 10px;
     overflow: hidden;
-    background: #121412;
+    background:
+      linear-gradient(180deg, rgba(255, 252, 239, 0.035), transparent),
+      #121611;
   }
 
   .table-head,
   .row {
     display: grid;
-    grid-template-columns: minmax(120px, 1.4fr) 88px minmax(160px, 2fr);
+    grid-template-columns: minmax(120px, 1.35fr) 92px minmax(160px, 2fr);
     gap: 0.75rem;
     align-items: center;
-    padding: 0 0.8rem;
+    padding: 0 0.9rem;
     box-sizing: border-box;
   }
 
   .table-head {
-    min-height: 34px;
-    border-bottom: 1px solid rgba(236, 232, 223, 0.08);
+    min-height: 36px;
+    border-bottom: 1px solid rgba(238, 232, 219, 0.1);
     color: #a8a094;
-    font-size: 0.78rem;
+    font-size: 0.72rem;
+    font-weight: 800;
     text-transform: uppercase;
     letter-spacing: 0.08em;
   }
@@ -387,7 +391,12 @@
     position: absolute;
     left: 0;
     right: 0;
-    border-bottom: 1px solid rgba(236, 232, 223, 0.06);
+    border-bottom: 1px solid rgba(238, 232, 219, 0.06);
+    transition: background 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .row:hover {
+    background: rgba(238, 232, 219, 0.045);
   }
 
   .name-cell {
@@ -397,11 +406,18 @@
     min-width: 0;
     border: none;
     background: transparent;
-    color: #d7ff6f;
+    color: #dff59a;
     cursor: pointer;
     padding: 0;
     font: inherit;
+    font-weight: 650;
     text-align: left;
+    transition: color 140ms cubic-bezier(0.16, 1, 0.3, 1), transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .name-cell:hover {
+    color: #f2b16f;
+    transform: translateX(2px);
   }
 
   .name,
@@ -412,7 +428,8 @@
   }
 
   .size {
-    color: #f6f2e9;
+    color: #fbf6eb;
+    font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
 
