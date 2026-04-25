@@ -91,8 +91,8 @@ Performance baselines and capture rules live in [docs/BENCHMARKS.md](docs/BENCHM
 
 GitHub Actions is configured for two repository workflows:
 
-- `CI` runs on pull requests and pushes to `main` on `windows-latest`, then executes `pnpm check`, `pnpm build`, and `cargo test`.
-- `Release Main` runs on pushes to `main`, reads the repo SemVer version from `package.json`, and publishes a Windows Tauri release under that version tag.
+- `CI` runs on pull requests and pushes to `master` on `windows-latest`, then executes `pnpm check`, `pnpm build`, and `cargo test`.
+- `Release Master` runs on pushes to `master`, reads the repo SemVer version from `package.json`, and publishes a Windows Tauri release under that version tag.
 
 Oxide uses SemVer with `0.2.0` as the current release line. When you intentionally bump versions, update `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` together.
 

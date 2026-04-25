@@ -1,9 +1,9 @@
-name: Release Main
+name: Release Master
 
 on:
   push:
     branches:
-      - main
+      - master
   workflow_dispatch:
 
 permissions:
@@ -54,10 +54,10 @@ jobs:
           tagName: ${{ steps.version.outputs.release_version }}
           releaseName: Oxide ${{ steps.version.outputs.release_version }}
           releaseBody: |
-            Automated release build from the latest commit on `main`.
+            Automated release build from the latest commit on `master`.
 
             Current SemVer: `${{ steps.version.outputs.release_version }}`
-            This release is updated on every push to `main` and uses the repository's SemVer version line.
+            This release is updated on every push to `master` and uses the repository's SemVer version line.
           releaseCommitish: ${{ github.sha }}
           releaseDraft: false
           prerelease: false
