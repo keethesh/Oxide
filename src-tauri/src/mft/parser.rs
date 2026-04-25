@@ -2,6 +2,10 @@ use std::char::decode_utf16;
 
 use crate::core::file_entry::FileFlags;
 
+const ATTRIBUTE_TYPE_FILE_NAME: u32 = 0x30;
+const ATTRIBUTE_TYPE_DATA: u32 = 0x80;
+const ATTRIBUTE_TYPE_END: u32 = 0xFFFF_FFFF;
+
 #[derive(Debug, Clone)]
 pub struct MftEntry {
     pub id: u64,
@@ -55,7 +59,7 @@ pub fn parse_record_with_scratch(
             data[attr_offset + 3],
         ]);
 
-        if attr_type == 0xFFFFFFFF {
+        if attr_type == ATTRIBUTE_TYPE_END {
             break; // End of attributes
         }
 
@@ -71,7 +75,7 @@ pub fn parse_record_with_scratch(
         }
 
         match attr_type {
-            0x30 => {
+            ATTRIBUTE_TYPE_FILE_NAME => {
                 // $FILE_NAME
                 let content_offset =
                     u16::from_le_bytes([data[attr_offset + 20], data[attr_offset + 21]]) as usize;
@@ -132,31 +136,10 @@ pub fn parse_record_with_scratch(
                     }
                 }
             }
-            0x80 => {
+            ATTRIBUTE_TYPE_DATA => {
                 // $DATA
-                let non_resident = data[attr_offset + 8] != 0;
-                if !non_resident {
-                    // Resident data
-                    let content_len = u32::from_le_bytes([
-                        data[attr_offset + 16],
-                        data[attr_offset + 17],
-                        data[attr_offset + 18],
-                        data[attr_offset + 19],
-                    ]) as u64;
-                    size = content_len;
-                } else {
-                    // Non-resident data
-                    let real_size = u64::from_le_bytes([
-                        data[attr_offset + 48],
-                        data[attr_offset + 49],
-                        data[attr_offset + 50],
-                        data[attr_offset + 51],
-                        data[attr_offset + 52],
-                        data[attr_offset + 53],
-                        data[attr_offset + 54],
-                        data[attr_offset + 55],
-                    ]);
-                    size = real_size;
+                if let Some(data_size) = unnamed_data_attribute_size(data, attr_offset, attr_len) {
+                    size = data_size;
                 }
             }
             _ => {}
@@ -180,6 +163,42 @@ pub fn parse_record_with_scratch(
         })
     } else {
         None
+    }
+}
+
+fn unnamed_data_attribute_size(data: &[u8], attr_offset: usize, attr_len: usize) -> Option<u64> {
+    if attr_offset.checked_add(attr_len)? > data.len() || attr_len < 24 {
+        return None;
+    }
+
+    let name_len = data[attr_offset + 9];
+    if name_len != 0 {
+        return None;
+    }
+
+    let non_resident = data[attr_offset + 8] != 0;
+    if non_resident {
+        if attr_len < 56 {
+            return None;
+        }
+
+        Some(u64::from_le_bytes([
+            data[attr_offset + 48],
+            data[attr_offset + 49],
+            data[attr_offset + 50],
+            data[attr_offset + 51],
+            data[attr_offset + 52],
+            data[attr_offset + 53],
+            data[attr_offset + 54],
+            data[attr_offset + 55],
+        ]))
+    } else {
+        Some(u32::from_le_bytes([
+            data[attr_offset + 16],
+            data[attr_offset + 17],
+            data[attr_offset + 18],
+            data[attr_offset + 19],
+        ]) as u64)
     }
 }
 
@@ -240,4 +259,44 @@ fn apply_file_attributes(mut flags: u16, file_attributes: u32) -> u16 {
         flags |= FileFlags::Reparse as u16;
     }
     flags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_resident_unnamed_data_attribute_size() {
+        let mut attribute = vec![0u8; 24];
+        attribute[16..20].copy_from_slice(&1234u32.to_le_bytes());
+
+        assert_eq!(
+            unnamed_data_attribute_size(&attribute, 0, attribute.len()),
+            Some(1234)
+        );
+    }
+
+    #[test]
+    fn reads_non_resident_unnamed_data_attribute_real_size() {
+        let mut attribute = vec![0u8; 64];
+        attribute[8] = 1;
+        attribute[48..56].copy_from_slice(&987_654_321u64.to_le_bytes());
+
+        assert_eq!(
+            unnamed_data_attribute_size(&attribute, 0, attribute.len()),
+            Some(987_654_321)
+        );
+    }
+
+    #[test]
+    fn ignores_named_alternate_data_stream_size() {
+        let mut attribute = vec![0u8; 32];
+        attribute[9] = 15;
+        attribute[16..20].copy_from_slice(&42u32.to_le_bytes());
+
+        assert_eq!(
+            unnamed_data_attribute_size(&attribute, 0, attribute.len()),
+            None
+        );
+    }
 }
