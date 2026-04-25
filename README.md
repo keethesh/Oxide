@@ -87,6 +87,13 @@ Performance baselines and capture rules live in [docs/BENCHMARKS.md](docs/BENCHM
 - [CONTRIBUTING.md](CONTRIBUTING.md) covers the contribution workflow.
 - [SECURITY.md](SECURITY.md) explains how to report vulnerabilities.
 
+## CI/CD
+
+GitHub Actions is configured for two repository workflows:
+
+- `CI` runs on pull requests and pushes to `main` on `windows-latest`, then executes `pnpm check`, `pnpm build`, and `cargo test`.
+- `Release Main` runs on pushes to `main` and updates a rolling GitHub prerelease tagged `main` with the latest Windows Tauri bundle.
+
 ## License
 
 Oxide is licensed under the MIT License. See [LICENSE](LICENSE).
