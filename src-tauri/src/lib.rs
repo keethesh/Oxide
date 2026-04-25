@@ -910,6 +910,31 @@ mod tests {
     }
 
     #[test]
+    fn scoped_largest_files_are_selected_from_descendants() {
+        let mut tree = FileTree::with_root("C:\\");
+        let folder = dir_entry(&mut tree, "folder");
+        let nested = dir_entry(&mut tree, "nested");
+        let root_file = file_entry(&mut tree, "root.bin", 100);
+        let file_a = file_entry(&mut tree, "a.bin", 10);
+        let file_b = file_entry(&mut tree, "b.bin", 30);
+        let file_c = file_entry(&mut tree, "c.bin", 20);
+        tree.attach_child(tree.root_id(), folder);
+        tree.attach_child(tree.root_id(), root_file);
+        tree.attach_child(folder, file_a);
+        tree.attach_child(folder, nested);
+        tree.attach_child(nested, file_b);
+        tree.attach_child(nested, file_c);
+        tree.aggregate_sizes();
+        tree.rebuild_largest_files();
+
+        let page = tree.get_largest_files(folder, 0, 2);
+
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].name, "b.bin");
+        assert_eq!(page[1].name, "c.bin");
+    }
+
+    #[test]
     fn file_paths_reconstruct_full_paths() {
         let mut tree = FileTree::with_root("C:\\");
         let folder = dir_entry(&mut tree, "folder");

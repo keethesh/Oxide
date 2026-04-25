@@ -1,7 +1,10 @@
 use super::arena::StringArena;
 use super::file_entry::{FileEntry, FileFlags};
-use rayon::prelude::*;
 use serde::Serialize;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+
+const ROOT_LARGEST_FILES_PREVIEW: usize = 8_192;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct NodeSummary {
@@ -40,6 +43,7 @@ pub struct FileTree {
     pub entries: Vec<FileEntry>,
     pub names: StringArena,
     pub largest_files: Vec<u32>,
+    pub largest_files_preview: Vec<u32>,
 }
 
 impl FileTree {
@@ -48,6 +52,7 @@ impl FileTree {
             entries: Vec::with_capacity(1_000_000),
             names: StringArena::new(),
             largest_files: Vec::new(),
+            largest_files_preview: Vec::new(),
         }
     }
 
@@ -129,20 +134,23 @@ impl FileTree {
 
     pub fn rebuild_largest_files(&mut self) {
         let mut largest_files = Vec::with_capacity(self.entries.len().saturating_sub(1));
+        let mut preview_heap = BinaryHeap::with_capacity(ROOT_LARGEST_FILES_PREVIEW + 1);
         for (index, entry) in self.entries.iter().enumerate() {
             if index != self.root_id() as usize && !entry.is_dir() && entry.size > 0 {
-                largest_files.push(index as u32);
+                let file_id = index as u32;
+                largest_files.push(file_id);
+                push_preview_candidate(&mut preview_heap, entry.size, file_id);
             }
         }
 
-        largest_files.par_sort_unstable_by(|a, b| {
-            self.entries[*b as usize]
-                .size
-                .cmp(&self.entries[*a as usize].size)
-                .then_with(|| a.cmp(b))
-        });
+        let mut largest_files_preview: Vec<u32> = preview_heap
+            .into_iter()
+            .map(|candidate| candidate.id)
+            .collect();
+        largest_files_preview.sort_unstable_by(largest_file_order(&self.entries));
 
         self.largest_files = largest_files;
+        self.largest_files_preview = largest_files_preview;
     }
 
     pub fn get_node_name(&self, id: u32) -> String {
@@ -264,33 +272,86 @@ impl FileTree {
             return Vec::new();
         }
 
-        let mut rows = Vec::new();
-        let mut skipped = 0usize;
+        let requested = offset.saturating_add(limit);
+        if root_id == self.root_id()
+            && requested <= self.largest_files_preview.len()
+            && offset < self.largest_files_preview.len()
+        {
+            return self.largest_files_preview[offset..requested]
+                .iter()
+                .copied()
+                .map(|file_id| self.file_row(file_id))
+                .collect();
+        }
 
-        for file_id in self.largest_files.iter().copied() {
-            if !self.is_descendant_or_self(file_id, root_id) {
-                continue;
-            }
+        let file_ids = if root_id == self.root_id() {
+            self.largest_files.clone()
+        } else {
+            self.collect_file_descendants(root_id)
+        };
+        self.select_largest_file_rows(file_ids, offset, limit)
+    }
 
-            if skipped < offset {
-                skipped += 1;
-                continue;
-            }
+    fn select_largest_file_rows(
+        &self,
+        mut file_ids: Vec<u32>,
+        offset: usize,
+        limit: usize,
+    ) -> Vec<FileRow> {
+        let requested = offset.saturating_add(limit);
+        if requested == 0 {
+            return Vec::new();
+        }
 
-            let entry = &self.entries[file_id as usize];
-            rows.push(FileRow {
-                id: file_id,
-                name: self.display_name(file_id),
-                size: entry.size,
-                parent_id: entry.parent_index,
-                is_hidden: entry.is_hidden(),
-            });
-            if rows.len() == limit {
-                break;
+        if file_ids.len() > requested {
+            file_ids.select_nth_unstable_by(requested, largest_file_order(&self.entries));
+            file_ids.truncate(requested);
+        }
+        file_ids.sort_unstable_by(largest_file_order(&self.entries));
+
+        file_ids
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|file_id| self.file_row(file_id))
+            .collect()
+    }
+
+    fn collect_file_descendants(&self, root_id: u32) -> Vec<u32> {
+        let mut file_ids = Vec::new();
+        let mut stack = Vec::new();
+        let mut child = self.entries[root_id as usize].first_child_index;
+
+        while child != FileEntry::NULL_INDEX {
+            stack.push(child);
+            child = self.entries[child as usize].next_sibling_index;
+        }
+
+        while let Some(id) = stack.pop() {
+            let entry = &self.entries[id as usize];
+            if entry.is_dir() {
+                let mut child = entry.first_child_index;
+                while child != FileEntry::NULL_INDEX {
+                    stack.push(child);
+                    child = self.entries[child as usize].next_sibling_index;
+                }
+            } else if entry.size > 0 {
+                file_ids.push(id);
             }
         }
 
-        rows
+        file_ids
+    }
+
+    fn file_row(&self, file_id: u32) -> FileRow {
+        let entry = &self.entries[file_id as usize];
+        FileRow {
+            id: file_id,
+            name: self.display_name(file_id),
+            size: entry.size,
+            parent_id: entry.parent_index,
+            is_hidden: entry.is_hidden(),
+        }
     }
 
     pub fn get_file_paths(&self, file_ids: &[u32]) -> Vec<FilePathRow> {
@@ -322,17 +383,6 @@ impl FileTree {
             name
         }
     }
-
-    fn is_descendant_or_self(&self, id: u32, root_id: u32) -> bool {
-        let mut current = id;
-        while current != FileEntry::NULL_INDEX && (current as usize) < self.entries.len() {
-            if current == root_id {
-                return true;
-            }
-            current = self.entries[current as usize].parent_index;
-        }
-        false
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -344,6 +394,27 @@ struct ChildCandidate {
     has_children: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreviewCandidate {
+    size: u64,
+    id: u32,
+}
+
+impl Ord for PreviewCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .size
+            .cmp(&self.size)
+            .then_with(|| self.id.cmp(&other.id))
+    }
+}
+
+impl PartialOrd for PreviewCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 fn sort_child_candidates(children: &mut [ChildCandidate]) {
     children.sort_unstable_by(|a, b| {
         b.is_dir
@@ -351,4 +422,33 @@ fn sort_child_candidates(children: &mut [ChildCandidate]) {
             .then_with(|| b.size.cmp(&a.size))
             .then_with(|| a.id.cmp(&b.id))
     });
+}
+
+fn largest_file_order(entries: &[FileEntry]) -> impl Fn(&u32, &u32) -> std::cmp::Ordering + '_ {
+    |a, b| {
+        entries[*b as usize]
+            .size
+            .cmp(&entries[*a as usize].size)
+            .then_with(|| a.cmp(b))
+    }
+}
+
+fn push_preview_candidate(heap: &mut BinaryHeap<PreviewCandidate>, size: u64, id: u32) {
+    let candidate = PreviewCandidate { size, id };
+    if heap.len() < ROOT_LARGEST_FILES_PREVIEW {
+        heap.push(candidate);
+        return;
+    }
+
+    let Some(worst) = heap.peek().copied() else {
+        return;
+    };
+    if is_better_preview_candidate(candidate, worst) {
+        heap.pop();
+        heap.push(candidate);
+    }
+}
+
+fn is_better_preview_candidate(candidate: PreviewCandidate, worst: PreviewCandidate) -> bool {
+    candidate.size > worst.size || (candidate.size == worst.size && candidate.id < worst.id)
 }

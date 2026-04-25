@@ -19,7 +19,7 @@ use windows::Win32::Storage::FileSystem::{
 };
 
 const PROBE_RECORDS: u32 = 16;
-const CHUNK_RECORDS: u32 = 4_096;
+const CHUNK_RECORDS: u32 = 16_384;
 const MFT_RECORD_ID: u64 = 0;
 const ROOT_RECORD_ID: u64 = 5;
 const METADATA_RECORD_IDS: [u64; 10] = [0, 1, 2, 3, 4, 6, 7, 8, 9, 10];
