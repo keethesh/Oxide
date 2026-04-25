@@ -39,17 +39,25 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Read release version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          "release_version=v$version" >> $env:GITHUB_OUTPUT
+
       - name: Build and publish Tauri bundle
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: main
-          releaseName: Oxide main
+          tagName: ${{ steps.version.outputs.release_version }}
+          releaseName: Oxide ${{ steps.version.outputs.release_version }}
           releaseBody: |
-            Automated prerelease build from the latest commit on `main`.
+            Automated release build from the latest commit on `main`.
 
-            This release is updated on every push to `main` and is intended for quick validation of the current branch head.
+            Current SemVer: `${{ steps.version.outputs.release_version }}`
+            This release is updated on every push to `main` and uses the repository's SemVer version line.
           releaseCommitish: ${{ github.sha }}
           releaseDraft: false
-          prerelease: true
+          prerelease: false
