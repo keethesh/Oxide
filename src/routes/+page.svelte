@@ -280,6 +280,27 @@
     return `Profile: scan ${formatDuration(timings.scan_ms)} · aggregate ${formatDuration(timings.aggregate_ms)} · largest-file index ${formatDuration(timings.largest_files_ms)} · store ${formatDuration(timings.store_ms)} · total ${formatDuration(timings.total_ms)}`;
   }
 
+  async function exportSnapshot() {
+    const snapshot = [
+      `Oxide scan snapshot`,
+      `Drive: ${scanResult?.drive_letter ?? selectedDriveInfo?.letter ?? (selectedDrive || "none")}`,
+      `Status: ${status}`,
+      `Mode: ${scanModeSummary}`,
+      `Files: ${(scanResult?.files_scanned ?? progress.files_scanned).toLocaleString()}`,
+      `Folders: ${(scanResult?.dirs_scanned ?? progress.dirs_scanned).toLocaleString()}`,
+      `Size: ${formatSize(scanResult?.bytes_scanned ?? progress.bytes_scanned)}`,
+      `Duration: ${visibleDurationLabel}`,
+      profileSummary
+    ].filter(Boolean).join("\n");
+
+    try {
+      await navigator.clipboard?.writeText(snapshot);
+      status = "Scan snapshot copied to clipboard.";
+    } catch {
+      status = snapshot;
+    }
+  }
+
   const selectedDriveInfo = $derived(
     drives.find((drive) => drive.letter === selectedDrive) ?? null
   );
@@ -306,25 +327,89 @@
         ? `${(scanResult.files_scanned + scanResult.dirs_scanned).toLocaleString()} entries mapped`
         : "Ready"
   );
+  const activeFiles = $derived(scanResult?.files_scanned ?? progress.files_scanned);
+  const activeDirs = $derived(scanResult?.dirs_scanned ?? progress.dirs_scanned);
+  const activeBytes = $derived(scanResult?.bytes_scanned ?? progress.bytes_scanned);
+  const scanProgressPercent = $derived.by(() => {
+    if (scanResult) {
+      return 100;
+    }
+
+    if (!isScanning) {
+      return 0;
+    }
+
+    const elapsedSeconds = liveDurationMs / 1000;
+    const expectedScanSeconds = currentScanMode === "filesystem" ? 55 : 24;
+    const normalized = Math.min(1, elapsedSeconds / expectedScanSeconds);
+    const eased = 1 - (1 - normalized) ** 2.4;
+    return Math.min(94, Math.max(4, eased * 94));
+  });
+  const scanProgressStyle = $derived(`width: ${scanProgressPercent.toFixed(1)}%`);
+  const selectedDriveLabel = $derived(
+    selectedDriveInfo
+      ? `${selectedDriveInfo.label} [${selectedDriveInfo.filesystem}]`
+      : selectedDrive || "No drive selected"
+  );
+  const readyState = $derived(
+    drivesLoading
+      ? "Detecting volumes"
+      : isScanning
+        ? "Live scan"
+        : scanResult
+          ? "Scan complete"
+          : tauriAvailable
+            ? "Ready"
+            : "Preview mode"
+  );
 </script>
 
 <svelte:head>
   <title>Oxide</title>
 </svelte:head>
 
-<main class="shell">
-  <header class="top-bar">
-    <div class="brand">
-      <img class="brand-mark" src="/logo.png" alt="Oxide logo" />
-      <div class="brand-copy">
-        <h1>Oxide</h1>
-        <span>NTFS disk space analyzer</span>
+<main class="app-shell">
+  <nav class="rail" aria-label="Primary views">
+    <img class="rail-brand" src="/logo.png" alt="Oxide" />
+    <button
+      class:active={activeTab === "treemap"}
+      class="rail-btn"
+      title="Treemap"
+      aria-label="Treemap"
+      onclick={() => (activeTab = "treemap")}
+    >
+      <span class="icon-grid" aria-hidden="true"></span>
+    </button>
+    <button
+      class:active={activeTab === "list"}
+      class="rail-btn"
+      title="Largest files"
+      aria-label="Largest files"
+      onclick={() => (activeTab = "list")}
+    >
+      <span class="icon-list" aria-hidden="true"></span>
+    </button>
+    <span class="rail-divider" aria-hidden="true"></span>
+    <button class="rail-btn" title="Copy scan snapshot" aria-label="Copy scan snapshot" onclick={exportSnapshot}>
+      <span class="icon-export" aria-hidden="true"></span>
+    </button>
+  </nav>
+
+  <header class="hud">
+    <div class="hud-left">
+      <div>
+        <h1>Space Observatory</h1>
+        <span>{selectedDriveLabel}</span>
       </div>
+      <span class="status-pill">
+        <span class:active={isScanning} class="status-dot" aria-hidden="true"></span>
+        {readyState}
+      </span>
     </div>
 
-    <div class="top-controls">
+    <div class="hud-right">
       <label class="drive-picker">
-        <span>Drive</span>
+        <span class="visually-hidden">Drive</span>
         <span class="select-shell">
           <select bind:value={selectedDrive} disabled={drivesLoading || isScanning || !drives.length}>
             {#each drives as drive}
@@ -335,148 +420,195 @@
           </select>
         </span>
       </label>
-
+      <button class="hud-btn ghost" onclick={exportSnapshot}>Export</button>
       <button
-        class="scan-button"
+        class:scanning={isScanning}
+        class="hud-btn primary scan-action"
         disabled={!selectedDriveInfo?.supported || isScanning || drivesLoading}
         onclick={() => scan()}
       >
-        <span class:active={isScanning} class="button-icon" aria-hidden="true"></span>
-        <span>{isScanning ? "Scanning" : "Scan drive"}</span>
+        <svg
+          class:active={isScanning}
+          class="scan-icon"
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          fill="none"
+        >
+          <path
+            d="M20 12a8 8 0 1 1-2.34-5.66"
+            stroke="currentColor"
+            stroke-width="2.4"
+            stroke-linecap="round"
+          />
+          <path
+            d="M20 4v6h-6"
+            stroke="currentColor"
+            stroke-width="2.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        {isScanning ? "Scanning" : "Scan"}
       </button>
     </div>
   </header>
 
-  <section class="status-banner">
-    <div class="status-left">
-      <span class:active={isScanning} class="status-dot" aria-hidden="true"></span>
-      <div class="status-copy">
-        <strong>{status}</strong>
-        <span>{progress.phase} - {fallbackSummary || scanModeSummary}</span>
-      {#if profileSummary}
-          <span class="profile-line">{profileSummary}</span>
-      {/if}
-      </div>
-    </div>
+  <section class="canvas-zone" aria-label="Disk workspace">
+    {#if drivesLoading}
+      <section class="empty-state">Detecting local volumes...</section>
+    {:else if !drives.length}
+      <section class="empty-state">
+        {#if tauriAvailable}
+          No local drives were detected on this system.
+        {:else}
+          Browser preview mode is running without the Tauri bridge.
+        {/if}
+      </section>
+    {:else if selectedDriveInfo && !selectedDriveInfo.supported}
+      <section class="empty-state">
+        <strong>{selectedDriveInfo.letter} is {selectedDriveInfo.filesystem}</strong>
+        <span>Oxide currently scans NTFS volumes.</span>
+      </section>
+    {:else if isScanning}
+      <section class="scan-board" aria-label="Scan in progress">
+        <div class="scan-core">
+          <span class="status-pill">
+            <span class:active={isScanning} class="status-dot" aria-hidden="true"></span>
+            {progress.phase}
+          </span>
+          <strong>{selectedDriveInfo?.letter ?? selectedDrive} is being mapped</strong>
+          <span>{scanActivityLabel} · {formatSize(activeBytes)} · {visibleDurationLabel}</span>
+          <div class="scan-meter">
+            <span style={scanProgressStyle}></span>
+          </div>
+        </div>
+      </section>
+    {:else if scanResult}
+      <div class="workspace">
+        <section class="visual-stage" aria-label="Disk visualization">
+          <div class="stage-toolbar">
+            <div class="stage-context">
+              <span>{activeTab === "treemap" ? `Space map - ${scanResult.drive_letter}` : "Largest files"}</span>
+              <div class="breadcrumb">
+                {#each breadcrumbPath as [id, name], index (id)}
+                  {#if index > 0}
+                    <span class="sep">/</span>
+                  {/if}
+                  <button class="bc-item" onclick={() => (rootId = id)}>{name}</button>
+                {/each}
+              </div>
+            </div>
 
-    <div class="metrics" aria-label="Scan metrics">
-      <div>
-        <span>Files</span>
-        <strong>{progress.files_scanned.toLocaleString()}</strong>
-      </div>
-      <div>
-        <span>Folders</span>
-        <strong>{progress.dirs_scanned.toLocaleString()}</strong>
-      </div>
-      <div>
-        <span>Size</span>
-        <strong>{formatSize(progress.bytes_scanned)}</strong>
-      </div>
-      <div>
-        <span>Time</span>
-        <strong>{visibleDurationLabel}</strong>
-      </div>
-    </div>
+            <nav class="view-tabs" aria-label="View mode">
+              <button class:active={activeTab === "treemap"} onclick={() => (activeTab = "treemap")}>
+                Treemap
+              </button>
+              <button class:active={activeTab === "list"} onclick={() => (activeTab = "list")}>
+                Files
+              </button>
+            </nav>
+          </div>
 
-    <div class:active={isScanning} class="activity-line" aria-label={scanActivityLabel}>
-      <span></span>
+          <div class="visual-content">
+            {#if activeTab === "treemap"}
+              <Treemap {rootId} onNavigate={handleNavigate} />
+            {:else}
+              <FileList scanLoaded={true} {rootId} onNavigate={handleNavigate} compact={false} />
+            {/if}
+          </div>
+
+          <div class="hint">Click a block to drill in · Use breadcrumbs to climb back</div>
+        </section>
+
+        <aside class="analysis-rail" aria-label="Disk analysis tools">
+          <section class="navigator" aria-label="Folder navigator">
+            <TreeView
+              scanLoaded={true}
+              scanRootId={scanResult.root_id}
+              selectedId={rootId}
+              onSelect={handleNavigate}
+            />
+          </section>
+
+          <section class="inspector" aria-label="Largest files">
+            <FileList scanLoaded={true} {rootId} onNavigate={handleNavigate} compact />
+          </section>
+        </aside>
+      </div>
+    {:else}
+      <section class="start-board">
+        <div class="start-copy">
+          <img class="start-logo" src="/logo.png" alt="" aria-hidden="true" />
+          <div>
+            <strong>Choose a drive to inspect</strong>
+            <span>Map storage pressure first, then drill into folders and heavy files.</span>
+          </div>
+        </div>
+
+        <div class="drive-board" aria-label="Available drives">
+          {#each drives as drive}
+            <button
+              class:selected={selectedDrive === drive.letter}
+              class:unsupported={!drive.supported}
+              disabled={!drive.supported || isScanning}
+              onclick={() => {
+                selectedDrive = drive.letter;
+              }}
+            >
+              <span>
+                <strong>{drive.letter}</strong>
+                <small>{drive.label}</small>
+              </span>
+              <em>{drive.supported ? drive.filesystem : `${drive.filesystem} unsupported`}</em>
+            </button>
+          {/each}
+        </div>
+      </section>
+    {/if}
+  </section>
+
+  <section class="drawer" aria-label="Scan summary">
+    <div class="drawer-stat">
+      <span>Files</span>
+      <strong>{activeFiles.toLocaleString()}</strong>
+    </div>
+    <i></i>
+    <div class="drawer-stat">
+      <span>Folders</span>
+      <strong>{activeDirs.toLocaleString()}</strong>
+    </div>
+    <i></i>
+    <div class="drawer-stat">
+      <span>Indexed</span>
+      <strong>{formatSize(activeBytes)}</strong>
+    </div>
+    <i></i>
+    <div class="drawer-stat">
+      <span>Scan time</span>
+      <strong>{visibleDurationLabel}</strong>
+    </div>
+    <div class="drawer-progress">
+      <div>
+        <span>{progress.phase}</span>
+        <span>{scanActivityLabel}</span>
+      </div>
+      <div class:active={isScanning} class="activity-line">
+        <span style={scanProgressStyle}></span>
+      </div>
     </div>
   </section>
 
-  {#if drivesLoading}
-    <section class="empty-state">Loading drives...</section>
-  {:else if !drives.length}
-    <section class="empty-state">
-      {#if tauriAvailable}
-        No local drives were detected on this system.
-      {:else}
-        Browser preview mode is running without the Tauri bridge.
-      {/if}
-    </section>
-  {:else if selectedDriveInfo && !selectedDriveInfo.supported}
-    <section class="empty-state">
-      {selectedDriveInfo.letter} is formatted as {selectedDriveInfo.filesystem}. This MVP only supports NTFS volumes.
-    </section>
-  {:else if scanResult}
-    <div class="workspace">
-      <section class="visual-stage" aria-label="Disk visualization">
-        <div class="stage-toolbar">
-          <div class="stage-context">
-            <span>{activeTab === "treemap" ? `Space map - ${scanResult.drive_letter}` : "Largest files"}</span>
-            <div class="breadcrumb">
-              {#each breadcrumbPath as [id, name], index (id)}
-                {#if index > 0}
-                  <span class="sep">/</span>
-                {/if}
-                <button class="bc-item" onclick={() => (rootId = id)}>{name}</button>
-              {/each}
-            </div>
-          </div>
-
-          <nav class="view-tabs" aria-label="View mode">
-            <button class:active={activeTab === "treemap"} onclick={() => (activeTab = "treemap")}>
-              Treemap
-            </button>
-            <button class:active={activeTab === "list"} onclick={() => (activeTab = "list")}>
-              Largest Files
-            </button>
-          </nav>
-        </div>
-
-        <div class="visual-content">
-          {#if activeTab === "treemap"}
-            <Treemap {rootId} onNavigate={handleNavigate} />
-          {:else}
-            <FileList scanLoaded={true} {rootId} onNavigate={handleNavigate} />
-          {/if}
-        </div>
-      </section>
-
-      <aside class="analysis-rail" aria-label="Disk analysis tools">
-        <section class="navigator" aria-label="Folder navigator">
-          <TreeView
-            scanLoaded={true}
-            scanRootId={scanResult.root_id}
-            selectedId={rootId}
-            onSelect={handleNavigate}
-          />
-        </section>
-
-        <section class="inspector" aria-label="Largest files">
-          <FileList scanLoaded={true} {rootId} onNavigate={handleNavigate} />
-        </section>
-      </aside>
+  <footer class="telemetry">
+    <div>
+      <span>MFT</span><strong>{scanResult ? formatDuration(scanResult.timings.scan_ms) : "--"}</strong>
+      <span>Aggregate</span><strong>{scanResult ? formatDuration(scanResult.timings.aggregate_ms) : "--"}</strong>
+      <span>Index</span><strong>{scanResult ? formatDuration(scanResult.timings.largest_files_ms) : "--"}</strong>
     </div>
-  {:else}
-    <section class="start-board">
-      <div class="start-copy">
-        <img class="start-logo" src="/logo.png" alt="" aria-hidden="true" />
-        <div>
-          <strong>Choose a drive to inspect</strong>
-          <span>Start with a map-first view of storage pressure, then drill into folders and large files without loading the entire tree into the DOM.</span>
-        </div>
-      </div>
-
-      <div class="drive-board" aria-label="Available drives">
-        {#each drives as drive}
-          <button
-            class:selected={selectedDrive === drive.letter}
-            class:unsupported={!drive.supported}
-            disabled={!drive.supported || isScanning}
-            onclick={() => {
-              selectedDrive = drive.letter;
-            }}
-          >
-            <span>
-              <strong>{drive.letter}</strong>
-              <small>{drive.label}</small>
-            </span>
-            <em>{drive.supported ? drive.filesystem : `${drive.filesystem} unsupported`}</em>
-          </button>
-        {/each}
-      </div>
-    </section>
-  {/if}
+    <div>
+      <span>Mode</span><strong>{fallbackSummary || scanModeSummary}</strong>
+      <span>Status</span><strong>{status}</strong>
+    </div>
+  </footer>
 </main>
 
 <style>
@@ -520,392 +652,386 @@
     border-radius: 999px;
   }
 
-  .shell {
-    --bg: #0e1210;
-    --panel: #151712;
-    --surface: oklch(20% 0.018 125);
-    --surface-hover: oklch(24% 0.019 125);
-    --surface-active: oklch(27% 0.02 115);
-    --line: rgba(223, 245, 154, 0.08);
-    --line-strong: rgba(223, 245, 154, 0.18);
-    --text-muted: #aaa397;
-    --text-dim: #a8a094;
-    --text-soft: #d6cfc1;
+  .app-shell {
+    --bg-void: #0a0d0b;
+    --bg-base: #0e1210;
+    --bg-panel: rgba(21, 23, 18, 0.94);
+    --bg-glass: rgba(14, 18, 16, 0.78);
+    --surface-1: oklch(18% 0.015 125);
+    --surface-2: oklch(22% 0.017 125);
+    --surface-3: oklch(26% 0.019 115);
     --accent: #dff59a;
     --accent-2: #f2b16f;
-    --accent-ink: #20240c;
-    --warn: #ffb299;
+    --warn: #ffb199;
+    --text: #fbf6eb;
+    --muted: #9a948a;
+    --dim: #6b665e;
+    --line: rgba(223, 245, 154, 0.08);
+    --line-soft: rgba(223, 245, 154, 0.045);
     --ease: cubic-bezier(0.16, 1, 0.3, 1);
     display: grid;
-    grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-rows: 52px minmax(0, 1fr) auto 32px;
+    grid-template-columns: 48px minmax(0, 1fr);
+    grid-template-areas:
+      "rail hud"
+      "rail canvas"
+      "rail drawer"
+      "rail telemetry";
+    width: 100vw;
     height: 100vh;
-    min-width: 0;
     overflow: hidden;
-    background: rgba(8, 11, 9, 0.44);
+    background: var(--bg-void);
+    color: #e8e2d6;
   }
 
-  .top-bar {
+  .rail {
+    grid-area: rail;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 0;
+    border-right: 1px solid var(--line-soft);
+    background: var(--bg-base);
+    box-sizing: border-box;
+  }
+
+  .rail-brand {
+    width: 32px;
+    height: 32px;
+    margin-bottom: 22px;
+    border: 1px solid rgba(223, 245, 154, 0.22);
+    border-radius: 8px;
+    background: #090d0a;
+    object-fit: cover;
+    object-position: left center;
+    box-shadow: 0 0 24px rgba(223, 245, 154, 0.18);
+  }
+
+  .rail-btn {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    transition: background 180ms var(--ease), color 180ms var(--ease), transform 180ms var(--ease);
+  }
+
+  .rail-btn:hover {
+    background: var(--surface-1);
+    color: #e8e2d6;
+    transform: translateY(-1px);
+  }
+
+  .rail-btn.active {
+    background: var(--surface-2);
+    color: var(--accent);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+
+  .rail-btn.active::before {
+    content: "";
+    position: absolute;
+    left: -6px;
+    width: 3px;
+    height: 16px;
+    border-radius: 0 2px 2px 0;
+    background: var(--accent);
+  }
+
+  .rail-divider {
+    width: 20px;
+    height: 1px;
+    margin: 8px 0;
+    background: var(--line-soft);
+  }
+
+  .icon-grid,
+  .icon-list,
+  .icon-export {
+    width: 17px;
+    height: 17px;
+    display: block;
+  }
+
+  .icon-grid {
+    background:
+      linear-gradient(currentColor 0 0) 0 0 / 7px 7px,
+      linear-gradient(currentColor 0 0) 10px 0 / 7px 7px,
+      linear-gradient(currentColor 0 0) 0 10px / 7px 7px,
+      linear-gradient(currentColor 0 0) 10px 10px / 7px 7px;
+    background-repeat: no-repeat;
+  }
+
+  .icon-list {
+    background:
+      linear-gradient(currentColor 0 0) 0 2px / 17px 2px,
+      linear-gradient(currentColor 0 0) 0 8px / 17px 2px,
+      linear-gradient(currentColor 0 0) 0 14px / 17px 2px;
+    background-repeat: no-repeat;
+  }
+
+  .icon-export {
+    border: 2px solid currentColor;
+    border-top: 0;
+    box-sizing: border-box;
+  }
+
+  .icon-export::before {
+    content: "";
+    display: block;
+    width: 7px;
+    height: 7px;
+    margin: -1px auto 0;
+    border-top: 2px solid currentColor;
+    border-right: 2px solid currentColor;
+    transform: rotate(-45deg);
+  }
+
+  .hud {
+    grid-area: hud;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 18px;
-    min-height: 66px;
-    border-bottom: 1px solid var(--line);
-    background:
-      linear-gradient(180deg, rgba(255, 252, 239, 0.045), transparent),
-      rgba(21, 23, 18, 0.96);
-    padding: 0 24px;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--line-soft);
+    background: var(--bg-glass);
+    backdrop-filter: blur(20px) saturate(1.2);
     box-sizing: border-box;
   }
 
-  .brand {
+  .hud-left,
+  .hud-right {
     display: flex;
     align-items: center;
-    gap: 13px;
-    min-width: 12rem;
-  }
-
-  .brand-mark {
-    width: 42px;
-    height: 42px;
-    flex: 0 0 auto;
-    object-fit: cover;
-    object-position: left center;
-    border: 1px solid rgba(223, 245, 154, 0.24);
-    border-radius: 9px;
-    background: #090d0a;
-    box-shadow: 0 0 28px rgba(223, 245, 154, 0.14);
-  }
-
-  .brand-copy {
-    display: grid;
-    gap: 1px;
     min-width: 0;
   }
 
-  .brand h1 {
+  .hud-left {
+    gap: 18px;
+  }
+
+  .hud-right {
+    justify-content: flex-end;
+    gap: 10px;
+  }
+
+  .hud h1 {
     margin: 0;
-    color: #fbf6eb;
-    font-size: 1.02rem;
-    font-weight: 780;
-    letter-spacing: 0;
+    color: var(--text);
+    font-size: 0.84rem;
+    font-weight: 760;
     line-height: 1.1;
   }
 
-  .brand-copy span,
-  .drive-picker span,
-  .status-copy span,
-  .metrics span {
-    color: var(--text-muted);
-    font-size: 0.72rem;
+  .hud-left div {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
   }
 
-  .top-controls {
-    display: flex;
+  .hud-left div > span {
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 0.68rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .status-pill {
+    display: inline-flex;
     align-items: center;
-    justify-content: flex-end;
-    gap: 16px;
-    min-width: min(40rem, 58vw);
+    gap: 7px;
+    min-height: 24px;
+    border: 1px solid rgba(223, 245, 154, 0.12);
+    border-radius: 6px;
+    background: rgba(223, 245, 154, 0.08);
+    color: var(--accent);
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--accent);
+    box-shadow: 0 0 8px rgba(223, 245, 154, 0.55);
+  }
+
+  .status-dot.active {
+    animation: breathe 1.7s var(--ease) infinite;
   }
 
   .drive-picker {
-    display: grid;
-    grid-template-columns: auto minmax(14rem, 28rem);
-    align-items: center;
-    gap: 10px;
-    min-width: 0;
-    flex: 1;
-  }
-
-  .drive-picker > span:first-child {
-    font-weight: 800;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    display: block;
+    width: min(30vw, 24rem);
+    min-width: 13rem;
   }
 
   .select-shell {
     position: relative;
     display: block;
-    min-width: 0;
   }
 
   .select-shell::after {
     content: "";
     position: absolute;
+    right: 12px;
     top: 50%;
-    right: 13px;
     width: 7px;
     height: 7px;
-    border-right: 2px solid var(--text-muted);
-    border-bottom: 2px solid var(--text-muted);
+    border-right: 2px solid var(--muted);
+    border-bottom: 2px solid var(--muted);
     pointer-events: none;
     transform: translateY(-65%) rotate(45deg);
   }
 
-  select {
+  .hud select {
     width: 100%;
-    min-width: 0;
     appearance: none;
     border: 1px solid var(--line);
     border-radius: 8px;
-    background: var(--surface);
-    color: #f1ece2;
+    background: var(--surface-1);
+    color: #e8e2d6;
     cursor: pointer;
-    padding: 0.63rem 2.35rem 0.63rem 0.85rem;
-    transition: border-color 180ms var(--ease), background 180ms var(--ease);
+    font-size: 0.75rem;
+    font-weight: 650;
+    padding: 0.45rem 2rem 0.45rem 0.75rem;
   }
 
-  select:hover:not(:disabled) {
-    border-color: var(--line-strong);
-    background: var(--surface-hover);
-  }
-
-  .scan-button {
-    position: relative;
+  .hud-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 9px;
-    min-width: 8.25rem;
-    min-height: 38px;
-    overflow: hidden;
-    border: 0;
+    gap: 7px;
+    min-height: 32px;
     border-radius: 8px;
-    background: linear-gradient(180deg, #efffb6, var(--accent));
-    color: var(--accent-ink);
     cursor: pointer;
-    font-weight: 820;
-    padding: 0 1rem;
-    transition: transform 180ms var(--ease), box-shadow 180ms var(--ease), filter 180ms var(--ease);
+    font-size: 0.75rem;
+    font-weight: 760;
+    padding: 0 0.9rem;
+    transition: background 180ms var(--ease), box-shadow 180ms var(--ease), transform 180ms var(--ease), color 180ms var(--ease);
   }
 
-  .scan-button:hover:not(:disabled) {
-    box-shadow: 0 12px 30px rgba(223, 245, 154, 0.23);
-    filter: saturate(1.04);
+  .hud-btn.ghost {
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--muted);
+  }
+
+  .hud-btn.ghost:hover {
+    background: var(--surface-1);
+    color: #e8e2d6;
+  }
+
+  .hud-btn.primary {
+    border: 0;
+    background: var(--accent);
+    color: #171b0b;
+  }
+
+  .hud-btn.primary:hover:not(:disabled) {
+    box-shadow: 0 0 20px rgba(223, 245, 154, 0.28);
     transform: translateY(-1px);
   }
 
-  .scan-button:active:not(:disabled) {
-    transform: translateY(0);
-  }
-
-  .button-icon {
-    width: 14px;
-    height: 14px;
-    border: 2px solid currentColor;
-    border-left-color: transparent;
-    border-radius: 999px;
-  }
-
-  .button-icon.active {
-    animation: spin 850ms linear infinite;
-  }
-
-  .scan-button:disabled,
-  select:disabled {
+  .hud select:disabled {
     cursor: not-allowed;
     opacity: 0.55;
   }
 
-  .status-banner {
+  .hud-btn:disabled {
+    cursor: not-allowed;
+  }
+
+  .hud-btn.primary:disabled:not(.scanning) {
+    opacity: 0.55;
+  }
+
+  .scan-action.scanning {
+    opacity: 1;
+    box-shadow: 0 0 20px rgba(223, 245, 154, 0.22);
+  }
+
+  .canvas-zone {
+    grid-area: canvas;
     position: relative;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 18px;
-    min-height: 76px;
+    min-width: 0;
+    min-height: 0;
     overflow: hidden;
-    border-bottom: 1px solid var(--line);
     background:
-      linear-gradient(90deg, rgba(223, 245, 154, 0.07), transparent 54%),
-      rgba(14, 18, 16, 0.9);
-    padding: 13px 24px;
-    box-sizing: border-box;
-  }
-
-  .status-left {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    min-width: 0;
-  }
-
-  .status-dot {
-    width: 9px;
-    height: 9px;
-    flex: 0 0 auto;
-    border-radius: 999px;
-    background: var(--accent);
-    box-shadow: 0 0 12px rgba(223, 245, 154, 0.44);
-  }
-
-  .status-dot.active {
-    animation: pulse 1.45s var(--ease) infinite;
-  }
-
-  .status-copy {
-    display: grid;
-    gap: 3px;
-    min-width: 0;
-  }
-
-  .status-copy strong {
-    overflow: hidden;
-    color: #fbf6eb;
-    font-size: 0.93rem;
-    font-weight: 760;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .profile-line {
-    overflow: hidden;
-    max-width: 72vw;
-    color: var(--text-dim) !important;
-    font-variant-numeric: tabular-nums;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .metrics {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(5.75rem, auto));
-    gap: 28px;
-  }
-
-  .metrics div {
-    display: grid;
-    gap: 2px;
-    min-width: 0;
-    text-align: right;
-  }
-
-  .metrics span {
-    font-weight: 800;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .metrics strong {
-    overflow: hidden;
-    color: #fbf6eb;
-    font-size: 0.96rem;
-    font-variant-numeric: tabular-nums;
-    font-weight: 760;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .metrics div:nth-child(3) strong {
-    color: var(--accent);
-  }
-
-  .activity-line {
-    position: absolute;
-    right: 24px;
-    bottom: 0;
-    left: 24px;
-    height: 2px;
-    overflow: hidden;
-    background: rgba(223, 245, 154, 0.07);
-  }
-
-  .activity-line span {
-    display: block;
-    width: 34%;
-    height: 100%;
-    background: linear-gradient(90deg, transparent, var(--accent), var(--accent-2), transparent);
-    transform: translateX(-100%);
-  }
-
-  .activity-line.active span {
-    animation: scan-line 1.35s var(--ease) infinite;
+      linear-gradient(rgba(223, 245, 154, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(223, 245, 154, 0.025) 1px, transparent 1px),
+      var(--bg-void);
+    background-size: 40px 40px;
   }
 
   .workspace {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(21rem, 24rem);
+    grid-template-columns: minmax(0, 1fr) minmax(20rem, 23rem);
+    width: 100%;
+    height: 100%;
     min-height: 0;
-    overflow: hidden;
-  }
-
-  .visual-stage,
-  .analysis-rail {
-    min-height: 0;
-    background: rgba(13, 17, 14, 0.72);
   }
 
   .visual-stage {
+    position: relative;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
-  }
-
-  .analysis-rail {
-    display: grid;
-    grid-template-rows: minmax(14rem, 1fr) minmax(14rem, 1fr);
-    overflow: hidden;
-    border-left: 1px solid var(--line);
-    background: rgba(21, 23, 18, 0.94);
-  }
-
-  .navigator,
-  .inspector {
+    min-width: 0;
     min-height: 0;
     overflow: hidden;
-  }
-
-  .inspector {
-    border-top: 1px solid var(--line);
-    padding: 16px 20px;
-    box-sizing: border-box;
   }
 
   .stage-toolbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    min-height: 62px;
-    padding: 12px 24px 10px;
+    gap: 16px;
+    min-height: 54px;
+    padding: 12px 18px 8px;
     box-sizing: border-box;
   }
 
   .stage-context {
     display: grid;
-    gap: 5px;
+    gap: 4px;
     min-width: 0;
   }
 
   .stage-context > span {
-    color: var(--text-muted);
-    font-size: 0.72rem;
+    color: var(--muted);
+    font-size: 0.64rem;
     font-weight: 850;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
   }
 
   .breadcrumb {
     display: flex;
-    flex-wrap: wrap;
     align-items: center;
-    gap: 4px;
+    gap: 3px;
     min-width: 0;
-  }
-
-  .bc-item,
-  .view-tabs button {
-    border: none;
-    background: transparent;
-    color: #e9e1d5;
-    cursor: pointer;
   }
 
   .bc-item {
     max-width: 12rem;
     overflow: hidden;
-    padding: 0.2rem 0.35rem;
+    border: 0;
     border-radius: 6px;
+    background: transparent;
+    color: #e8e2d6;
+    cursor: pointer;
+    padding: 0.12rem 0.35rem;
     text-overflow: ellipsis;
     white-space: nowrap;
     transition: color 160ms var(--ease), background 160ms var(--ease);
@@ -917,74 +1043,168 @@
   }
 
   .sep {
-    color: #6d746d;
+    color: var(--dim);
   }
 
   .view-tabs {
     display: flex;
-    align-items: center;
     gap: 4px;
-    overflow: hidden;
+    flex-shrink: 0;
     border: 1px solid var(--line);
     border-radius: 8px;
-    background: var(--surface);
-    flex-shrink: 0;
+    background: var(--surface-1);
     padding: 4px;
   }
 
   .view-tabs button {
-    min-height: 30px;
+    min-width: 4.2rem;
+    min-height: 28px;
+    border: 0;
     border-radius: 6px;
-    color: var(--text-muted);
-    padding: 0 0.85rem;
-    transition: color 160ms var(--ease), background 160ms var(--ease);
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 0.74rem;
   }
 
-  .view-tabs button:hover {
-    color: #f6f0e5;
+  .view-tabs button:hover,
+  .view-tabs button.active {
+    color: var(--text);
   }
 
   .view-tabs button.active {
-    background: var(--surface-active);
-    color: #fbf6eb;
+    background: var(--surface-3);
     font-weight: 800;
   }
 
   .visual-content {
     flex: 1;
     min-height: 0;
-    display: flex;
-    overflow: hidden;
-    padding: 0 24px 24px;
+    padding: 0 18px 18px;
+    box-sizing: border-box;
   }
 
   .visual-content > :global(*) {
     min-height: 0;
   }
 
+  .analysis-rail {
+    display: grid;
+    grid-template-rows: minmax(13rem, 0.95fr) minmax(14rem, 1fr);
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    border-left: 1px solid var(--line);
+    background: var(--bg-panel);
+    backdrop-filter: blur(16px);
+  }
+
+  .navigator,
+  .inspector {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .inspector {
+    border-top: 1px solid var(--line-soft);
+    padding: 14px 16px;
+    box-sizing: border-box;
+  }
+
+  .hint {
+    position: absolute;
+    left: 18px;
+    bottom: 18px;
+    z-index: 2;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: rgba(14, 18, 16, 0.72);
+    color: var(--muted);
+    font-size: 0.72rem;
+    padding: 0.45rem 0.7rem;
+    pointer-events: none;
+  }
+
+  .empty-state,
+  .scan-board,
+  .start-board {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+  }
+
   .empty-state {
     display: grid;
     place-content: center;
-    min-height: 0;
-    border-top: 1px solid var(--line);
-    background: rgba(21, 23, 18, 0.72);
-    color: var(--text-muted);
+    gap: 0.45rem;
+    color: var(--muted);
     padding: 2rem;
     text-align: center;
+    box-sizing: border-box;
+  }
+
+  .empty-state strong {
+    color: var(--text);
+  }
+
+  .scan-board {
+    display: grid;
+    place-items: center;
+    padding: clamp(1.5rem, 4vw, 4rem);
+    box-sizing: border-box;
+  }
+
+  .scan-core {
+    display: grid;
+    gap: 12px;
+    width: min(38rem, 100%);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background:
+      linear-gradient(135deg, rgba(223, 245, 154, 0.085), transparent 52%),
+      rgba(14, 18, 16, 0.72);
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+    padding: clamp(1.25rem, 3vw, 2rem);
+    backdrop-filter: blur(14px);
+  }
+
+  .scan-core .status-pill {
+    justify-self: start;
+  }
+
+  .scan-core strong {
+    color: var(--text);
+    font-size: clamp(1.35rem, 2.6vw, 2.4rem);
+    font-weight: 820;
+    line-height: 1.05;
+  }
+
+  .scan-core > span:not(.status-pill) {
+    color: var(--muted);
+  }
+
+  .scan-meter {
+    height: 8px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: rgba(223, 245, 154, 0.08);
+  }
+
+  .scan-meter span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background:
+      linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.28), rgba(255, 255, 255, 0)) 0 0 / 72px 100%,
+      linear-gradient(90deg, var(--accent), var(--accent-2));
+    transition: width 520ms var(--ease);
+    animation: meter-sheen 1.6s linear infinite;
   }
 
   .start-board {
     display: grid;
-    grid-template-columns: minmax(18rem, 0.82fr) minmax(20rem, 1fr);
-    min-height: 0;
+    grid-template-columns: minmax(19rem, 0.82fr) minmax(21rem, 1fr);
     overflow: hidden;
-    border-top: 1px solid var(--line);
-    background: rgba(13, 17, 14, 0.72);
-  }
-
-  .start-copy,
-  .drive-board {
-    min-height: 0;
   }
 
   .start-copy {
@@ -992,9 +1212,7 @@
     align-content: center;
     gap: 24px;
     border-right: 1px solid var(--line);
-    background:
-      linear-gradient(135deg, rgba(223, 245, 154, 0.08), transparent 48%),
-      rgba(21, 23, 18, 0.68);
+    background: rgba(21, 23, 18, 0.62);
     padding: clamp(1.5rem, 4vw, 4rem);
   }
 
@@ -1009,18 +1227,18 @@
   .start-copy div {
     display: grid;
     gap: 0.65rem;
-    max-width: 34rem;
+    max-width: 31rem;
   }
 
   .start-copy strong {
-    color: #fbf6eb;
-    font-size: clamp(1.6rem, 3.1vw, 3.1rem);
+    color: var(--text);
+    font-size: clamp(1.65rem, 3vw, 3rem);
     font-weight: 820;
     line-height: 1.02;
   }
 
   .start-copy span {
-    color: var(--text-muted);
+    color: var(--muted);
     line-height: 1.55;
   }
 
@@ -1040,7 +1258,7 @@
     min-height: 68px;
     border: 1px solid var(--line);
     border-radius: 8px;
-    background: var(--surface);
+    background: var(--surface-1);
     color: #ebe4d8;
     cursor: pointer;
     padding: 0.85rem 1rem;
@@ -1050,8 +1268,8 @@
 
   .drive-board button:hover:not(:disabled),
   .drive-board button.selected {
-    border-color: rgba(223, 245, 154, 0.36);
-    background: var(--surface-hover);
+    border-color: rgba(223, 245, 154, 0.34);
+    background: var(--surface-2);
     transform: translateY(-1px);
   }
 
@@ -1067,14 +1285,14 @@
   }
 
   .drive-board button strong {
-    color: #fbf6eb;
-    font-size: 1.08rem;
+    color: var(--text);
+    font-size: 1.05rem;
   }
 
   .drive-board small,
   .drive-board em {
     overflow: hidden;
-    color: var(--text-muted);
+    color: var(--muted);
     font-size: 0.78rem;
     font-style: normal;
     text-overflow: ellipsis;
@@ -1093,186 +1311,283 @@
     color: var(--accent);
   }
 
-  @keyframes pulse {
+  .drawer {
+    grid-area: drawer;
+    display: grid;
+    grid-template-columns: auto 1px auto 1px auto 1px auto minmax(12rem, 1fr);
+    align-items: center;
+    gap: 18px;
+    min-height: 58px;
+    border-top: 1px solid var(--line);
+    background: var(--bg-panel);
+    padding: 10px 20px;
+    box-sizing: border-box;
+  }
+
+  .drawer i {
+    width: 1px;
+    height: 24px;
+    background: var(--line-soft);
+  }
+
+  .drawer-stat {
+    display: grid;
+    gap: 2px;
+    min-width: 4.25rem;
+  }
+
+  .drawer-stat span,
+  .drawer-progress span,
+  .telemetry span {
+    color: var(--dim);
+    font-size: 0.64rem;
+    font-weight: 750;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+  }
+
+  .drawer-stat strong {
+    color: var(--text);
+    font-size: 0.84rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .drawer-progress {
+    display: grid;
+    gap: 7px;
+    min-width: 0;
+  }
+
+  .drawer-progress > div:first-child {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .drawer-progress > div:first-child span:last-child {
+    overflow: hidden;
+    color: var(--muted);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .activity-line {
+    height: 4px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--surface-1);
+  }
+
+  .activity-line span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background:
+      linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.32), rgba(255, 255, 255, 0)) 0 0 / 64px 100%,
+      linear-gradient(90deg, var(--accent), var(--accent-2));
+    transition: width 520ms var(--ease);
+  }
+
+  .activity-line.active span {
+    animation: meter-sheen 1.35s linear infinite;
+  }
+
+  .telemetry {
+    grid-area: telemetry;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    min-width: 0;
+    border-top: 1px solid var(--line-soft);
+    background: var(--bg-base);
+    padding: 0 20px;
+    box-sizing: border-box;
+  }
+
+  .telemetry div {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .telemetry strong {
+    overflow: hidden;
+    color: #d6cfc1;
+    font-size: 0.65rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .telemetry div:last-child {
+    justify-content: flex-end;
+  }
+
+  .scan-icon {
+    width: 15px;
+    height: 15px;
+    flex: 0 0 auto;
+    transform-origin: 50% 50%;
+  }
+
+  .scan-icon.active {
+    animation: spin 850ms linear infinite;
+  }
+
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  @keyframes breathe {
     0%,
     100% {
       opacity: 1;
-      box-shadow: 0 0 0 5px rgba(223, 245, 154, 0.08), 0 0 14px rgba(223, 245, 154, 0.34);
     }
     50% {
-      opacity: 0.62;
-      box-shadow: 0 0 0 9px rgba(223, 245, 154, 0.13), 0 0 22px rgba(223, 245, 154, 0.22);
+      opacity: 0.42;
     }
   }
 
-  @keyframes spin {
+  @keyframes meter-sheen {
     to {
-      transform: rotate(360deg);
+      background-position: 140px 0, 0 0;
     }
   }
 
-  @keyframes scan-line {
-    to {
-      transform: translateX(300%);
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-      animation-duration: 0.01ms !important;
-      animation-iteration-count: 1 !important;
-      scroll-behavior: auto !important;
-      transition-duration: 0.01ms !important;
-    }
-  }
-
-  @media (max-width: 1180px) {
+  @media (max-width: 1120px) {
     .workspace {
       grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: minmax(32rem, 1fr) minmax(18rem, 0.58fr);
+      grid-template-rows: minmax(28rem, 1fr) minmax(17rem, 0.5fr);
     }
 
     .analysis-rail {
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      grid-template-rows: minmax(0, 1fr);
+      grid-template-rows: 1fr;
       border-top: 1px solid var(--line);
-      border-left: none;
+      border-left: 0;
     }
 
     .inspector {
-      border-top: none;
-      border-left: 1px solid var(--line);
-    }
-
-    .metrics {
-      gap: 18px;
+      border-top: 0;
+      border-left: 1px solid var(--line-soft);
     }
   }
 
-  @media (max-width: 860px) {
+  @media (max-width: 820px) {
     :global(body) {
       overflow: auto;
     }
 
-    .shell {
+    .app-shell {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto auto minmax(30rem, 1fr) auto auto;
+      grid-template-areas:
+        "rail"
+        "hud"
+        "canvas"
+        "drawer"
+        "telemetry";
       height: auto;
       min-height: 100vh;
       overflow: visible;
-      grid-template-rows: auto auto minmax(34rem, 1fr);
     }
 
-    .top-bar,
-    .top-controls,
-    .status-banner,
-    .status-left {
+    .rail {
+      flex-direction: row;
+      justify-content: flex-start;
+      padding: 8px 12px;
+      border-right: 0;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .rail-brand {
+      margin: 0 12px 0 0;
+    }
+
+    .rail-btn.active::before {
+      left: 50%;
+      bottom: -8px;
+      top: auto;
+      width: 16px;
+      height: 3px;
+      border-radius: 2px 2px 0 0;
+      transform: translateX(-50%);
+    }
+
+    .rail-divider {
+      width: 1px;
+      height: 20px;
+      margin: 0 4px;
+    }
+
+    .hud,
+    .hud-left,
+    .hud-right {
       align-items: stretch;
-    }
-
-    .top-bar,
-    .top-controls {
       flex-direction: column;
     }
 
-    .top-bar {
-      padding: 14px;
+    .hud {
+      padding: 12px;
     }
 
-    .brand {
+    .drive-picker,
+    .hud-btn {
       width: 100%;
     }
 
-    .top-controls {
-      width: 100%;
-      min-width: 0;
-      gap: 10px;
-    }
-
-    .drive-picker {
-      grid-template-columns: 1fr;
-      width: 100%;
-    }
-
-    .scan-button {
-      width: 100%;
-    }
-
-    .status-banner {
-      grid-template-columns: 1fr;
-      padding: 14px;
-    }
-
-    .metrics {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-    }
-
-    .metrics div {
-      text-align: left;
-    }
-
-    .workspace {
-      grid-template-columns: 1fr;
-      grid-template-rows: minmax(30rem, 1fr) minmax(34rem, 0.9fr);
-    }
-
-    .analysis-rail,
-    .start-board {
+    .workspace,
+    .start-board,
+    .analysis-rail {
       grid-template-columns: 1fr;
       grid-template-rows: auto auto;
+    }
+
+    .canvas-zone {
+      min-height: 34rem;
+    }
+
+    .visual-stage {
+      min-height: 30rem;
     }
 
     .analysis-rail {
       min-height: 34rem;
     }
 
-    .inspector {
-      border-left: none;
-      border-top: 1px solid var(--line);
-    }
-
+    .inspector,
     .start-copy {
-      border-right: none;
-      border-bottom: 1px solid var(--line);
-    }
-  }
-
-  @media (max-width: 560px) {
-    .brand-mark {
-      width: 38px;
-      height: 38px;
+      border-left: 0;
+      border-right: 0;
+      border-top: 1px solid var(--line-soft);
     }
 
-    .status-left {
-      flex-direction: row;
+    .drawer {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
     }
 
-    .metrics {
-      grid-template-columns: 1fr;
+    .drawer i {
+      display: none;
     }
 
-    .stage-toolbar {
-      align-items: stretch;
+    .drawer-progress {
+      grid-column: 1 / -1;
+    }
+
+    .telemetry,
+    .telemetry div {
+      align-items: flex-start;
       flex-direction: column;
-      padding: 12px 14px;
-    }
-
-    .visual-content {
-      padding: 0 14px 14px;
-    }
-
-    .view-tabs {
-      width: 100%;
-    }
-
-    .view-tabs button {
-      flex: 1;
-      padding-inline: 0.45rem;
-    }
-
-    .start-logo {
-      width: 100%;
     }
   }
 </style>

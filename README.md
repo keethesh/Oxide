@@ -1,39 +1,72 @@
 # Oxide
 
-Oxide is a Windows-first NTFS disk space analyzer built with Rust, Tauri, Svelte, and TypeScript. It scans a drive by reading NTFS metadata directly from the Master File Table, then presents the result as a treemap, a lazy folder tree, and a largest-files view.
+**A Windows disk observatory for people who want to know where the space went without donating half their RAM to the search.**
 
-The current project goal is straightforward: beat traditional Windows disk analyzers on memory efficiency while staying fast enough to feel immediate on large drives.
+Oxide is a Windows-first disk space analyzer built with Rust, Tauri, Svelte, and TypeScript. It reads NTFS metadata directly from the Master File Table when it can, falls back to filesystem walking when it must, and presents the result as a fast, map-first interface for exploring very large drives.
 
-## Current Baseline
+The project has a simple bias: scan the drive, keep memory low, make the heavy parts measurable, and let the UI stay out of the way.
 
-Latest captured baseline on the maintainer's `C:` volume:
+## Why Oxide Exists
 
-- `mode=Mft`
-- `scan_ms=15081`
-- `aggregate_ms=210`
-- `largest_files_ms=175`
-- `store_ms=13`
-- `total_ms=15480`
-- `358 MB` RAM after scan settled
+Traditional disk analyzers are useful, but they can feel expensive on modern Windows machines with millions of files. Oxide is an attempt to keep the good part, the immediate sense of what is consuming space, while being more careful with memory and data flow.
 
-That run covered `4,041,909` files and `733,450` folders, or `4,775,359` total nodes. Full comparison notes live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Current priorities:
 
-## MVP Scope
+- **Fast NTFS scans** through direct MFT reads on supported volumes.
+- **Low post-scan memory use** through compact Rust-side storage.
+- **Progressive exploration** with a treemap, lazy folder tree, and paged largest-file lists.
+- **Honest performance work** with phase timings and reproducible benchmark notes.
 
-This repository currently implements an NTFS-only MVP:
+## What It Does Today
 
-- local drive discovery with NTFS support detection
-- one-drive scan flow with progress reporting
-- treemap navigation
-- lazy folder hierarchy browsing
-- paged largest-files list for the selected subtree
+Oxide currently implements an NTFS-focused MVP:
 
-Out of scope for this MVP:
+- discovers local drives and detects NTFS support
+- scans one drive at a time with progress reporting
+- uses a fast MFT path when permissions allow it
+- falls back to normal filesystem traversal when raw NTFS access is unavailable
+- renders a navigable treemap on canvas
+- browses folders lazily instead of building a giant DOM
+- pages largest-file results for the selected subtree
+- records scan, aggregation, indexing, and storage timings
 
-- deletion and recycle-bin actions
-- live updates via the USN journal
+Not implemented yet:
+
+- deletion or recycle-bin actions
+- live updates from the USN journal
 - duplicate-file detection
 - multi-drive comparison
+- polished export/report workflows
+
+## Performance Snapshot
+
+Latest captured local baseline on the maintainer's `C:` volume:
+
+| Metric | Oxide |
+| --- | ---: |
+| Scan mode | `mft` |
+| Files | `4,041,909` |
+| Folders | `733,450` |
+| Total nodes | `4,775,359` |
+| Data size | `369 GB` |
+| Scan phase | `15.08 s` |
+| Aggregation | `210 ms` |
+| Largest-file index | `175 ms` |
+| Total backend time | `15.48 s` |
+| Memory after scan | `358 MB` |
+
+These are engineering baselines, not universal claims. Disk cache state, elevation, drive type, antivirus activity, and file churn all matter. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for capture rules and comparison notes.
+
+## Interface
+
+Oxide is built around a compact workspace:
+
+- **Treemap** for spatially reading the drive at a glance.
+- **Folder navigator** for drilling through hierarchy without loading every node into the UI.
+- **Largest files** for finding heavy individual files inside the selected scope.
+- **Telemetry bar** for scan mode, timing, and phase information.
+
+The frontend stays intentionally thin. The Rust backend owns the scan, in-memory tree, layout generation, and paged queries. The UI asks for slices of data and renders them.
 
 ## Requirements
 
@@ -42,59 +75,75 @@ Out of scope for this MVP:
 - Node.js
 - PNPM
 - Visual Studio C++ Build Tools
-- Administrator access is recommended to read the NTFS MFT at full speed
+- Administrator access for the fastest MFT scan path
 
-## What Exists Today
-
-- raw NTFS MFT scanning with a filesystem fallback path
-- packed Rust file-tree storage tuned for multi-million-node scans
-- paged IPC queries for tree nodes and largest files
-- treemap layout caching and canvas rendering
-- benchmark and profiling hooks to track scan, aggregation, and indexing costs
+Oxide can run without elevation, but raw NTFS reads may fail and trigger the slower filesystem fallback.
 
 ## Local Development
 
+Install dependencies:
+
 ```bash
 pnpm install
+```
+
+Run frontend checks:
+
+```bash
 pnpm check
 pnpm build
+```
+
+Run Rust checks:
+
+```bash
 cd src-tauri
 cargo check
+cargo test
 cd ..
+```
+
+Start the desktop app:
+
+```bash
 pnpm tauri dev
 ```
 
-Run the terminal as Administrator if you want the fast MFT scan path on local NTFS volumes.
+For realistic NTFS scan testing, run the terminal as Administrator before starting the app.
 
-## Current Verification
+## Repository Map
 
-The intended verification flow for this MVP is:
+| Path | Purpose |
+| --- | --- |
+| `src/routes/+page.svelte` | Main Svelte app shell and scan flow |
+| `src/lib/components/Treemap.svelte` | Canvas treemap renderer |
+| `src/lib/components/TreeView.svelte` | Lazy folder hierarchy browser |
+| `src/lib/components/FileList.svelte` | Paged largest-file view |
+| `src-tauri/src/lib.rs` | Tauri command layer and scan orchestration |
+| `src-tauri/src/scan/mft.rs` | NTFS MFT scan path |
+| `src-tauri/src/scan/filesystem.rs` | Filesystem fallback scan path |
+| `src-tauri/src/core/file_tree.rs` | Packed file-tree storage |
+| `docs/BENCHMARKS.md` | Benchmark capture rules and results |
+| `docs/PROJECT_OVERVIEW.md` | Architecture notes and roadmap |
 
-- `pnpm check`
-- `pnpm build`
-- `cargo check`
-- `cargo test`
+## Verification
 
-If `cargo test` fails because the machine is low on free disk space, clear space on the system drive and rerun it before shipping.
+Before shipping a meaningful change, run the checks that match the blast radius:
 
-## Benchmarks
+```bash
+pnpm check
+pnpm build
+cd src-tauri
+cargo test
+```
 
-Performance baselines and capture rules live in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Record scan duration, post-scan memory, scan mode, elevation state, and file/folder counts before comparing against other disk analyzers.
+For performance changes, include before/after numbers and describe the scan environment. Warm cache versus cold cache is not a footnote; it can change the story.
 
-## Documentation
+## Contributing
 
-- [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md) explains the current architecture and roadmap.
-- [CONTRIBUTING.md](CONTRIBUTING.md) covers the contribution workflow.
-- [SECURITY.md](SECURITY.md) explains how to report vulnerabilities.
+The best contributions are focused and measurable: bug fixes, reproducible performance reports, UI clarity improvements, and docs that match the current behavior.
 
-## CI/CD
-
-GitHub Actions is configured for two repository workflows:
-
-- `CI` runs on pull requests and pushes to `master` on `windows-latest`, then executes `pnpm check`, `pnpm build`, and `cargo test`.
-- `Release Master` runs on pushes to `master`, reads the repo SemVer version from `package.json`, and publishes a Windows Tauri release under that version tag.
-
-Oxide uses SemVer with `0.2.0` as the current release line. When you intentionally bump versions, update `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` together.
+Start with [CONTRIBUTING.md](CONTRIBUTING.md). For security reports, use [SECURITY.md](SECURITY.md).
 
 ## License
 

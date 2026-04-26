@@ -253,8 +253,6 @@
     <div class="overlay">Rendering treemap...</div>
   {:else if layoutError}
     <div class="overlay error">{layoutError}</div>
-  {:else if layout.some((rect) => rect.kind === "overflow")}
-    <div class="overlay subtle">Small tiles grouped into Other</div>
   {/if}
 
   {#if hoveredRect}
@@ -290,26 +288,25 @@
 
   .overlay {
     position: absolute;
-    top: 1rem;
-    left: 1rem;
+    top: 0.7rem;
+    left: 0.7rem;
     z-index: 1;
-    border: 1px solid rgba(223, 245, 154, 0.12);
-    border-radius: 8px;
-    background: rgba(15, 18, 14, 0.86);
-    padding: 0.45rem 0.8rem;
+    border: 1px solid rgba(223, 245, 154, 0.1);
+    border-radius: 999px;
+    background: rgba(15, 18, 14, 0.46);
+    padding: 0.28rem 0.55rem;
     color: #fbf6eb;
-    font-size: 0.82rem;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    pointer-events: none;
     backdrop-filter: blur(12px);
   }
 
   .overlay.error {
     color: #ffb199;
   }
-
-  .overlay.subtle {
-    color: #a8a094;
-  }
-
   .hover-card {
     position: absolute;
     right: 1rem;

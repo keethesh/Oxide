@@ -10,11 +10,13 @@
   let {
     scanLoaded,
     rootId,
-    onNavigate
+    onNavigate,
+    compact = false
   } = $props<{
     scanLoaded: boolean;
     rootId: number;
     onNavigate: (id: number) => void;
+    compact?: boolean;
   }>();
 
   type HydratedFileRow = FileRow & {
@@ -239,10 +241,10 @@
   });
 </script>
 
-<div class="file-list">
+<div class:compact class="file-list">
   <div class="heading">
-    <h2>Largest Files</h2>
-    <p>Selected scope</p>
+    <h2>{compact ? "Top Files" : "Largest Files"}</h2>
+    <p>{files.length ? `${files.length.toLocaleString()} indexed` : "Selected scope"}</p>
   </div>
 
   {#if !scanLoaded}
@@ -254,7 +256,9 @@
       <div class="table-head">
         <span>Name</span>
         <span>Size</span>
-        <span>Path</span>
+        {#if !compact}
+          <span>Path</span>
+        {/if}
       </div>
 
       {#if files.length === 0 && loading}
@@ -273,7 +277,9 @@
                   {/if}
                 </button>
                 <span class="size">{formatSize(file.size)}</span>
-                <span class="path">{pathFor(file)}</span>
+                {#if !compact}
+                  <span class="path">{pathFor(file)}</span>
+                {/if}
               </div>
             {/each}
           </div>
@@ -312,6 +318,10 @@
     height: 100%;
     color: #ebe4d8;
     min-height: 0;
+  }
+
+  .file-list.compact {
+    gap: 0.6rem;
   }
 
   .heading {
@@ -368,6 +378,13 @@
     box-sizing: border-box;
   }
 
+  .compact .table-head,
+  .compact .row {
+    grid-template-columns: minmax(0, 1fr) 76px;
+    gap: 0.55rem;
+    padding: 0 0.7rem;
+  }
+
   .table-head {
     min-height: 36px;
     border-bottom: 1px solid rgba(223, 245, 154, 0.08);
@@ -376,6 +393,10 @@
     font-weight: 800;
     text-transform: uppercase;
     letter-spacing: 0.08em;
+  }
+
+  .compact .table-head {
+    min-height: 32px;
   }
 
   .viewport {
@@ -402,6 +423,22 @@
     background: oklch(24% 0.019 125);
   }
 
+  .row::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 9px;
+    bottom: 9px;
+    width: 2px;
+    border-radius: 0 2px 2px 0;
+    background: transparent;
+    transition: background 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .row:hover::before {
+    background: #dff59a;
+  }
+
   .name-cell {
     display: inline-flex;
     align-items: center;
@@ -423,6 +460,10 @@
     transform: translateX(2px);
   }
 
+  .compact .name-cell {
+    color: #ebe4d8;
+  }
+
   .name,
   .path {
     overflow: hidden;
@@ -434,6 +475,12 @@
     color: #fbf6eb;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+  }
+
+  .compact .size {
+    color: #dff59a;
+    font-size: 0.78rem;
+    text-align: right;
   }
 
   .path {
