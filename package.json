@@ -1,6 +1,6 @@
 {
   "name": "oxide",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Lightning-fast disk space analyzer",
   "type": "module",
   "scripts": {

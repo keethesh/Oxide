@@ -1,0 +1,1105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Oxide — Disk Observatory</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-void: #0a0d0b;
+            --bg-base: #0e1210;
+            --bg-panel: rgba(21, 23, 18, 0.92);
+            --bg-glass: rgba(14, 18, 16, 0.75);
+            --surface-1: oklch(18% 0.015 125);
+            --surface-2: oklch(22% 0.017 125);
+            --surface-3: oklch(26% 0.019 115);
+            --accent-lime: #dff59a;
+            --accent-amber: #f2b16f;
+            --accent-salmon: #ffb199;
+            --text-primary: #fbf6eb;
+            --text-secondary: #e8e2d6;
+            --text-muted: #9a948a;
+            --text-dim: #6b665e;
+            --border-subtle: rgba(223, 245, 154, 0.04);
+            --border-medium: rgba(223, 245, 154, 0.08);
+            --grid-line: rgba(223, 245, 154, 0.03);
+            --shadow-glow: rgba(223, 245, 154, 0.08);
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: var(--font-sans);
+            background: var(--bg-void);
+            color: var(--text-secondary);
+            height: 100vh;
+            overflow: hidden;
+            line-height: 1.5;
+        }
+
+        /* ─── App Shell ─── */
+        .app {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: grid;
+            grid-template-rows: auto 1fr auto auto;
+            grid-template-columns: 48px 1fr;
+            grid-template-areas:
+                "rail hud"
+                "rail canvas"
+                "rail drawer"
+                "rail telemetry";
+        }
+
+        /* ─── Navigation Rail ─── */
+        .rail {
+            grid-area: rail;
+            background: var(--bg-base);
+            border-right: 1px solid var(--border-subtle);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 16px 0;
+            gap: 8px;
+            z-index: 100;
+        }
+
+        .rail-brand {
+            width: 32px;
+            height: 32px;
+            background: var(--accent-lime);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            color: var(--bg-void);
+            font-size: 13px;
+            margin-bottom: 24px;
+            box-shadow: 0 0 24px rgba(223, 245, 154, 0.2);
+        }
+
+        .rail-btn {
+            width: 36px;
+            height: 36px;
+            border-radius: 10px;
+            border: none;
+            background: transparent;
+            color: var(--text-muted);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+            position: relative;
+        }
+
+        .rail-btn:hover {
+            background: var(--surface-1);
+            color: var(--text-secondary);
+        }
+
+        .rail-btn.active {
+            background: var(--surface-2);
+            color: var(--accent-lime);
+            box-shadow: inset 0 0 0 1px var(--border-medium);
+        }
+
+        .rail-btn.active::before {
+            content: '';
+            position: absolute;
+            left: -16px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 3px;
+            height: 16px;
+            background: var(--accent-lime);
+            border-radius: 0 2px 2px 0;
+        }
+
+        .rail-divider {
+            width: 20px;
+            height: 1px;
+            background: var(--border-subtle);
+            margin: 8px 0;
+        }
+
+        /* ─── HUD (Top Bar) ─── */
+        .hud {
+            grid-area: hud;
+            height: 52px;
+            background: var(--bg-glass);
+            backdrop-filter: blur(20px) saturate(1.2);
+            border-bottom: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            z-index: 90;
+        }
+
+        .hud-left {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .hud-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+            letter-spacing: -0.01em;
+        }
+
+        .hud-meta {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .hud-meta span {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 10px;
+            border-radius: 6px;
+            background: rgba(223, 245, 154, 0.08);
+            border: 1px solid rgba(223, 245, 154, 0.12);
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--accent-lime);
+        }
+
+        .status-pill .dot {
+            width: 6px;
+            height: 6px;
+            background: var(--accent-lime);
+            border-radius: 50%;
+            box-shadow: 0 0 6px rgba(223, 245, 154, 0.5);
+            animation: breathe 3s ease-in-out infinite;
+        }
+
+        @keyframes breathe {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .hud-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .hud-select {
+            appearance: none;
+            background: var(--surface-1);
+            border: 1px solid var(--border-medium);
+            border-radius: 8px;
+            padding: 7px 28px 7px 12px;
+            color: var(--text-secondary);
+            font-family: inherit;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            outline: none;
+        }
+
+        .hud-btn {
+            padding: 7px 16px;
+            border-radius: 8px;
+            border: none;
+            font-family: inherit;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.2s ease;
+        }
+
+        .hud-btn-primary {
+            background: var(--accent-lime);
+            color: var(--bg-void);
+        }
+
+        .hud-btn-primary:hover {
+            box-shadow: 0 0 20px rgba(223, 245, 154, 0.3);
+            transform: translateY(-0.5px);
+        }
+
+        .hud-btn-ghost {
+            background: transparent;
+            color: var(--text-muted);
+            border: 1px solid var(--border-medium);
+        }
+
+        .hud-btn-ghost:hover {
+            border-color: var(--border-medium);
+            color: var(--text-secondary);
+            background: var(--surface-1);
+        }
+
+        /* ─── Main Canvas ─── */
+        .canvas {
+            grid-area: canvas;
+            position: relative;
+            overflow: hidden;
+            background: var(--bg-void);
+        }
+
+        /* Grid overlay for technical feel */
+        .canvas::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background-image:
+                linear-gradient(var(--grid-line) 1px, transparent 1px),
+                linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+            background-size: 40px 40px;
+            pointer-events: none;
+            z-index: 1;
+        }
+
+        /* Treemap Layer */
+        .treemap-layer {
+            position: absolute;
+            inset: 0;
+            z-index: 2;
+        }
+
+        .treemap-container {
+            width: 100%;
+            height: 100%;
+            position: relative;
+        }
+
+        .tnode {
+            position: absolute;
+            border: 1px solid var(--bg-void);
+            cursor: pointer;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            padding: 8px 10px;
+            transition: filter 0.15s ease, box-shadow 0.15s ease, z-index 0s;
+        }
+
+        .tnode:hover {
+            z-index: 50;
+            filter: brightness(1.15);
+            box-shadow: inset 0 0 0 2px var(--accent-lime), 0 8px 40px rgba(0,0,0,0.5);
+        }
+
+        .tnode.selected {
+            z-index: 50;
+            box-shadow: inset 0 0 0 2px var(--accent-lime), 0 0 60px rgba(223, 245, 154, 0.1);
+        }
+
+        .tnode-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: rgba(251, 246, 235, 0.9);
+            text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            pointer-events: none;
+        }
+
+        .tnode-meta {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: rgba(251, 246, 235, 0.55);
+            margin-top: 2px;
+            pointer-events: none;
+        }
+
+        /* Color system */
+        .col-user { background: #3d4f3a; }
+        .col-user-2 { background: #4a5e46; }
+        .col-code { background: #3a4f50; }
+        .col-code-2 { background: #465e5f; }
+        .col-sys { background: #4a4538; }
+        .col-sys-2 { background: #5a5546; }
+        .col-game { background: #4a3a45; }
+        .col-game-2 { background: #5a4654; }
+        .col-temp { background: #3a3a3a; }
+        .col-media { background: #4f4a3a; }
+
+        /* Overlay Panels */
+        .overlay {
+            position: absolute;
+            z-index: 80;
+            background: var(--bg-panel);
+            backdrop-filter: blur(16px);
+            border: 1px solid var(--border-medium);
+            border-radius: 12px;
+            box-shadow: 0 16px 48px rgba(0,0,0,0.4);
+            transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease;
+        }
+
+        .overlay-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 16px;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .overlay-title {
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+        }
+
+        .overlay-close {
+            width: 20px;
+            height: 20px;
+            border: none;
+            background: transparent;
+            color: var(--text-dim);
+            cursor: pointer;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+        }
+
+        .overlay-close:hover {
+            color: var(--text-secondary);
+            background: var(--surface-1);
+        }
+
+        /* Inspector (Right) */
+        .inspector {
+            top: 16px;
+            right: 16px;
+            width: 320px;
+            max-height: calc(100% - 32px);
+            display: flex;
+            flex-direction: column;
+            opacity: 0;
+            transform: translateX(20px);
+            pointer-events: none;
+        }
+
+        .inspector.visible {
+            opacity: 1;
+            transform: translateX(0);
+            pointer-events: all;
+        }
+
+        .inspector-body {
+            padding: 16px;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .insp-hero {
+            margin-bottom: 20px;
+        }
+
+        .insp-name {
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--text-primary);
+            letter-spacing: -0.02em;
+            margin-bottom: 4px;
+        }
+
+        .insp-path {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+            word-break: break-all;
+        }
+
+        .insp-stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .insp-stat {
+            background: var(--surface-1);
+            border-radius: 8px;
+            padding: 10px 12px;
+            border: 1px solid var(--border-subtle);
+        }
+
+        .insp-stat-label {
+            font-size: 10px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            margin-bottom: 2px;
+        }
+
+        .insp-stat-value {
+            font-family: var(--font-mono);
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .insp-stat-value.accent {
+            color: var(--accent-lime);
+        }
+
+        .insp-section {
+            margin-top: 16px;
+        }
+
+        .insp-section-title {
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-bottom: 8px;
+        }
+
+        .file-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .file-row:last-child {
+            border-bottom: none;
+        }
+
+        .file-row-rank {
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-dim);
+            width: 16px;
+            text-align: center;
+        }
+
+        .file-row-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .file-row-name {
+            font-size: 12px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 1px;
+        }
+
+        .file-row-size {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--accent-lime);
+            font-weight: 500;
+            white-space: nowrap;
+        }
+
+        .file-row-bar {
+            width: 32px;
+            height: 3px;
+            background: var(--surface-2);
+            border-radius: 2px;
+            overflow: hidden;
+            flex-shrink: 0;
+        }
+
+        .file-row-bar-fill {
+            height: 100%;
+            background: var(--accent-amber);
+            border-radius: 2px;
+        }
+
+        /* Bottom Drawer */
+        .drawer {
+            grid-area: drawer;
+            position: relative;
+            width: 100%;
+            background: var(--bg-panel);
+            backdrop-filter: blur(16px);
+            border-top: 1px solid var(--border-medium);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s ease;
+        }
+
+        .drawer.visible {
+            opacity: 1;
+            pointer-events: all;
+        }
+
+        .drawer-body {
+            padding: 12px 24px;
+            display: flex;
+            gap: 24px;
+            align-items: center;
+        }
+
+        .drawer-stat {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .drawer-stat-label {
+            font-size: 9px;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            font-weight: 500;
+        }
+
+        .drawer-stat-value {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .drawer-divider {
+            width: 1px;
+            height: 24px;
+            background: var(--border-subtle);
+        }
+
+        .drawer-bar-group {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .drawer-bar-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 10px;
+            color: var(--text-muted);
+        }
+
+        .drawer-bar-track {
+            height: 4px;
+            background: var(--surface-1);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .drawer-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent-lime), var(--accent-amber));
+            border-radius: 2px;
+            transition: width 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        /* ─── Telemetry Bar ─── */
+        .telemetry {
+            grid-area: telemetry;
+            height: 32px;
+            background: var(--bg-base);
+            border-top: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-dim);
+            z-index: 90;
+        }
+
+        .telemetry-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .telemetry-right {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .telemetry-kv {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .telemetry-k {
+            color: var(--text-muted);
+        }
+
+        .telemetry-v {
+            color: var(--text-secondary);
+        }
+
+        /* ─── Tooltip ─── */
+        .tip {
+            position: fixed;
+            z-index: 200;
+            background: var(--bg-panel);
+            border: 1px solid var(--border-medium);
+            border-radius: 10px;
+            padding: 14px 18px;
+            pointer-events: none;
+            box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+            opacity: 0;
+            transition: opacity 0.12s ease;
+            min-width: 220px;
+            backdrop-filter: blur(12px);
+        }
+
+        .tip.visible { opacity: 1; }
+
+        .tip-header {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 6px;
+        }
+
+        .tip-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .tip-pct {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--accent-lime);
+            font-weight: 500;
+        }
+
+        .tip-meta {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .tip-track {
+            height: 3px;
+            background: var(--surface-2);
+            border-radius: 2px;
+            margin-top: 10px;
+            overflow: hidden;
+        }
+
+        .tip-fill {
+            height: 100%;
+            background: var(--accent-lime);
+            border-radius: 2px;
+        }
+
+        /* ─── Empty States / Helpers ─── */
+        .hint {
+            position: absolute;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 11px;
+            color: var(--text-dim);
+            background: var(--bg-glass);
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border-subtle);
+            pointer-events: none;
+            z-index: 70;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 3px; }
+
+        /* Intro animation */
+        @keyframes enter {
+            from { opacity: 0; transform: scale(0.98); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        .tnode {
+            animation: enter 0.4s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+        }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <!-- Rail -->
+        <nav class="rail">
+            <div class="rail-brand">Ox</div>
+            <button class="rail-btn active" title="Treemap">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+            </button>
+            <button class="rail-btn" title="Sunburst">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 10 10"/><path d="M12 12 2.1 9.9"/></svg>
+            </button>
+            <button class="rail-btn" title="List">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+            </button>
+            <div class="rail-divider"></div>
+            <button class="rail-btn" title="Settings">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+        </nav>
+
+        <!-- HUD -->
+        <header class="hud">
+            <div class="hud-left">
+                <span class="hud-title">Space Observatory</span>
+                <div class="hud-meta">
+                    <span class="status-pill"><span class="dot"></span> Live</span>
+                    <span>C: · NTFS · 499 GB capacity</span>
+                </div>
+            </div>
+            <div class="hud-right">
+                <select class="hud-select">
+                    <option>C: [NTFS] — 374 GB used</option>
+                    <option>D: [NTFS] — 120 GB used</option>
+                </select>
+                <button class="hud-btn hud-btn-ghost">Export</button>
+                <button class="hud-btn hud-btn-primary">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/><polyline points="21 3 21 9 15 9"/></svg>
+                    Scan
+                </button>
+            </div>
+        </header>
+
+        <!-- Canvas -->
+        <main class="canvas">
+            <div class="treemap-layer" id="treemap"></div>
+
+            <!-- Inspector Panel -->
+            <div class="overlay inspector" id="inspector">
+                <div class="overlay-header">
+                    <span class="overlay-title">Inspector</span>
+                    <button class="overlay-close" onclick="deselect()">×</button>
+                </div>
+                <div class="inspector-body">
+                    <div class="insp-hero">
+                        <div class="insp-name" id="inspName">Users</div>
+                        <div class="insp-path" id="inspPath">C:\Users</div>
+                        <div class="insp-stats">
+                            <div class="insp-stat">
+                                <div class="insp-stat-label">Size</div>
+                                <div class="insp-stat-value accent" id="inspSize">240 GB</div>
+                            </div>
+                            <div class="insp-stat">
+                                <div class="insp-stat-label">Items</div>
+                                <div class="insp-stat-value" id="inspItems">1.2 M</div>
+                            </div>
+                            <div class="insp-stat">
+                                <div class="insp-stat-label">% of Drive</div>
+                                <div class="insp-stat-value accent" id="inspPct">64.2%</div>
+                            </div>
+                            <div class="insp-stat">
+                                <div class="insp-stat-label">Modified</div>
+                                <div class="insp-stat-value">2h ago</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="insp-section">
+                        <div class="insp-section-title">Top Files</div>
+                        <div id="inspFiles"></div>
+                    </div>
+
+                    <div class="insp-section">
+                        <div class="insp-section-title">Actions</div>
+                        <div style="display:flex;gap:8px;">
+                            <button class="hud-btn hud-btn-ghost" style="flex:1;justify-content:center;">Open</button>
+                            <button class="hud-btn hud-btn-ghost" style="flex:1;justify-content:center;color:var(--accent-salmon);border-color:rgba(255,177,153,0.2);">Delete</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Hint overlay -->
+            <div class="hint">Click any block to inspect · Scroll to zoom · Drag to pan</div>
+        </main>
+
+        <!-- Bottom Drawer (moved outside canvas) -->
+        <div class="drawer visible" id="drawer">
+                <div class="drawer-body">
+                    <div class="drawer-stat">
+                        <span class="drawer-stat-label">Files</span>
+                        <span class="drawer-stat-value">4,047,502</span>
+                    </div>
+                    <div class="drawer-divider"></div>
+                    <div class="drawer-stat">
+                        <span class="drawer-stat-label">Folders</span>
+                        <span class="drawer-stat-value">734,196</span>
+                    </div>
+                    <div class="drawer-divider"></div>
+                    <div class="drawer-stat">
+                        <span class="drawer-stat-label">Scan Time</span>
+                        <span class="drawer-stat-value">8.7 s</span>
+                    </div>
+                    <div class="drawer-divider"></div>
+                    <div class="drawer-bar-group">
+                        <div class="drawer-bar-label">
+                            <span>374 GB used of 499 GB</span>
+                            <span>75%</span>
+                        </div>
+                        <div class="drawer-bar-track">
+                            <div class="drawer-bar-fill" style="width:75%"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="hint">Click any block to inspect · Scroll to zoom · Drag to pan</div>
+        </main>
+
+        <!-- Telemetry -->
+        <footer class="telemetry">
+            <div class="telemetry-left">
+                <span class="telemetry-kv"><span class="telemetry-k">MFT scan:</span><span class="telemetry-v">8.5 s</span></span>
+                <span class="telemetry-kv"><span class="telemetry-k">Aggregate:</span><span class="telemetry-v">170 ms</span></span>
+                <span class="telemetry-kv"><span class="telemetry-k">Index:</span><span class="telemetry-v">22 ms</span></span>
+            </div>
+            <div class="telemetry-right">
+                <span class="telemetry-kv"><span class="telemetry-k">Algorithm:</span><span class="telemetry-v">Squarified treemap</span></span>
+                <span class="telemetry-kv"><span class="telemetry-k">Render:</span><span class="telemetry-v">WebGL-ready</span></span>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Tooltip -->
+    <div class="tip" id="tip">
+        <div class="tip-header">
+            <span class="tip-name" id="tipName"></span>
+            <span class="tip-pct" id="tipPct"></span>
+        </div>
+        <div class="tip-meta" id="tipMeta"></div>
+        <div class="tip-track"><div class="tip-fill" id="tipFill"></div></div>
+    </div>
+
+    <script>
+        /* ─── Treemap Data ─── */
+        const treeData = [
+            { id:'users', name:'Users', size:240, type:'user', path:'C:\\Users', items:'1.2 M', files:[
+                {n:'God of War (Update).pkg', s:'7.9 GB', p:100},
+                {n:'Documents.backup.zip', s:'4.2 GB', p:53},
+                {n:'Videos/RAW_2024', s:'3.1 GB', p:39},
+                {n:'node_modules/', s:'2.8 GB', p:35},
+            ]},
+            { id:'webstorm', name:'WebstormProjects', size:62, type:'code', path:'C:\\WebstormProjects', items:'84 K', files:[
+                {n:'intellij-idea-community/', s:'12 GB', p:100},
+                {n:'kotlin/compiler/', s:'8.4 GB', p:70},
+                {n:'gradle-cache/', s:'6.1 GB', p:51},
+            ]},
+            { id:'progfiles', name:'Program Files', size:36, type:'sys', path:'C:\\Program Files', items:'12 K', files:[
+                {n:'Docker/Docker.vhdx', s:'8.1 GB', p:100},
+                {n:'Adobe/AfterFX', s:'4.2 GB', p:52},
+            ]},
+            { id:'windows', name:'Windows', size:36, type:'sys', path:'C:\\Windows', items:'45 K', files:[
+                {n:'WinSxS/', s:'12 GB', p:100},
+                {n:'Installer/', s:'4.5 GB', p:38},
+            ]},
+            { id:'prog86', name:'Program Files (x86)', size:30, type:'sys', path:'C:\\Program Files (x86)', items:'8 K', files:[
+                {n:'Steam/steamapps/', s:'18 GB', p:100},
+            ]},
+            { id:'pycharm', name:'PycharmProjects', size:28, type:'code', path:'C:\\PycharmProjects', items:'32 K', files:[]},
+            { id:'progdata', name:'ProgramData', size:16, type:'sys', path:'C:\\ProgramData', items:'4 K', hidden:true, files:[]},
+            { id:'riot', name:'Riot Games', size:12, type:'game', path:'C:\\Riot Games', items:'2 K', files:[
+                {n:'VALORANT/live/', s:'8.9 GB', p:100},
+                {n:'League of Legends/', s:'3.1 GB', p:35},
+            ]},
+            { id:'downloads', name:'Downloads', size:10, type:'user', path:'C:\\Users\\keeth\\Downloads', items:'1.2 K', files:[]},
+            { id:'docs', name:'Documents', size:9, type:'user', path:'C:\\Users\\keeth\\Documents', items:'8 K', files:[]},
+            { id:'temp', name:'Temp', size:7, type:'temp', path:'C:\\Temp', items:'45 K', files:[]},
+            { id:'npm', name:'npm-cache', size:5, type:'temp', path:'C:\\Users\\keeth\\.npm', items:'12 K', files:[]},
+            { id:'vivaldi', name:'Vivaldi', size:4, type:'media', path:'C:\\Users\\keeth\\AppData', items:'3 K', files:[]},
+            { id:'packages', name:'Packages', size:3.5, type:'sys', path:'C:\\Windows\\Packages', items:'900', files:[]},
+            { id:'gemini', name:'.gemini', size:3, type:'code', path:'C:\\Users\\keeth\\.gemini', items:'200', files:[]},
+            { id:'hamming', name:'HammingTree', size:2.5, type:'code', path:'C:\\HammingTree', items:'150', files:[]},
+            { id:'uv', name:'uv', size:2, type:'temp', path:'C:\\Users\\keeth\\.uv', items:'80', files:[]},
+            { id:'scoop', name:'scoop', size:1.8, type:'sys', path:'C:\\Users\\keeth\\scoop', items:'400', files:[]},
+        ];
+
+        const totalSize = treeData.reduce((a,b)=>a+b.size, 0);
+        const colorMap = {
+            user: ['col-user','col-user-2'],
+            code: ['col-code','col-code-2'],
+            sys: ['col-sys','col-sys-2'],
+            game: ['col-game','col-game-2'],
+            temp: ['col-temp'],
+            media: ['col-media']
+        };
+
+        /* ─── Squarified Treemap Layout ─── */
+        function layoutTreemap(data, x, y, w, h) {
+            if (data.length === 0) return [];
+            if (data.length === 1) {
+                return [{...data[0], x, y, w, h}];
+            }
+
+            const total = data.reduce((a,b)=>a+b.size, 0);
+            const mid = Math.ceil(data.length / 2);
+            const row1 = data.slice(0, mid);
+            const row2 = data.slice(mid);
+            const s1 = row1.reduce((a,b)=>a+b.size, 0);
+            const s2 = row2.reduce((a,b)=>a+b.size, 0);
+
+            const vert = w < h;
+            let res = [];
+
+            if (vert) {
+                const h1 = h * (s1 / total);
+                res = res.concat(layoutTreemap(row1, x, y, w, h1));
+                res = res.concat(layoutTreemap(row2, x, y+h1, w, h-h1));
+            } else {
+                const w1 = w * (s1 / total);
+                res = res.concat(layoutTreemap(row1, x, y, w1, h));
+                res = res.concat(layoutTreemap(row2, x+w1, y, w-w1, h));
+            }
+            return res;
+        }
+
+        function renderTreemap() {
+            const container = document.getElementById('treemap');
+            container.innerHTML = '';
+            const W = container.offsetWidth;
+            const H = container.offsetHeight;
+
+            const sorted = [...treeData].sort((a,b)=>b.size-a.size);
+            const nodes = layoutTreemap(sorted, 0, 0, W, H);
+
+            nodes.forEach((node, i) => {
+                const el = document.createElement('div');
+                const colors = colorMap[node.type] || ['col-temp'];
+                const colorClass = colors[i % colors.length];
+
+                el.className = `tnode ${colorClass}`;
+                el.style.left = `${node.x}px`;
+                el.style.top = `${node.y}px`;
+                el.style.width = `${node.w}px`;
+                el.style.height = `${node.h}px`;
+                el.style.animationDelay = `${i * 0.02}s`;
+                el.dataset.id = node.id;
+
+                const pct = ((node.size / totalSize) * 100).toFixed(1);
+                const showLabel = node.w > 60 && node.h > 40;
+
+                if (showLabel) {
+                    el.innerHTML = `
+                        <div class="tnode-label">${node.name}</div>
+                        ${node.h > 55 ? `<div class="tnode-meta">${node.size} GB · ${pct}%</div>` : ''}
+                    `;
+                }
+
+                el.addEventListener('mouseenter', e => showTip(e, node, pct));
+                el.addEventListener('mousemove', moveTip);
+                el.addEventListener('mouseleave', hideTip);
+                el.addEventListener('click', () => selectNode(node, pct));
+
+                container.appendChild(el);
+            });
+        }
+
+        /* ─── Tooltip ─── */
+        const tip = document.getElementById('tip');
+        function showTip(e, node, pct) {
+            document.getElementById('tipName').textContent = node.name;
+            document.getElementById('tipPct').textContent = pct + '%';
+            document.getElementById('tipMeta').textContent = `${node.size} GB · ${node.items} items${node.hidden ? ' · Hidden' : ''}`;
+            document.getElementById('tipFill').style.width = pct + '%';
+            tip.classList.add('visible');
+            moveTip(e);
+        }
+        function moveTip(e) {
+            const r = tip.getBoundingClientRect();
+            let x = e.clientX + 16, y = e.clientY + 16;
+            if (x + r.width > window.innerWidth) x = e.clientX - r.width - 16;
+            if (y + r.height > window.innerHeight) y = e.clientY - r.height - 16;
+            tip.style.left = x + 'px';
+            tip.style.top = y + 'px';
+        }
+        function hideTip() { tip.classList.remove('visible'); }
+
+        /* ─── Selection / Inspector ─── */
+        let selectedId = null;
+        function selectNode(node, pct) {
+            // Clear previous
+            document.querySelectorAll('.tnode').forEach(n => n.classList.remove('selected'));
+            document.querySelectorAll('.tnode').forEach(n => {
+                if (n.dataset.id === node.id) n.classList.add('selected');
+            });
+            selectedId = node.id;
+
+            // Populate inspector
+            document.getElementById('inspName').textContent = node.name;
+            document.getElementById('inspPath').textContent = node.path;
+            document.getElementById('inspSize').textContent = node.size + ' GB';
+            document.getElementById('inspItems').textContent = node.items;
+            document.getElementById('inspPct').textContent = pct + '%';
+
+            // Files
+            const filesContainer = document.getElementById('inspFiles');
+            filesContainer.innerHTML = '';
+            if (node.files && node.files.length) {
+                node.files.forEach((f, i) => {
+                    const row = document.createElement('div');
+                    row.className = 'file-row';
+                    row.innerHTML = `
+                        <span class="file-row-rank">${i+1}</span>
+                        <div class="file-row-info">
+                            <div class="file-row-name">${f.n}</div>
+                        </div>
+                        <div class="file-row-bar"><div class="file-row-bar-fill" style="width:${f.p}%"></div></div>
+                        <span class="file-row-size">${f.s}</span>
+                    `;
+                    filesContainer.appendChild(row);
+                });
+            } else {
+                filesContainer.innerHTML = '<div style="font-size:12px;color:var(--text-dim);padding:8px 0;">No individual files indexed in this folder.</div>';
+            }
+
+            document.getElementById('inspector').classList.add('visible');
+        }
+
+        function deselect() {
+            document.querySelectorAll('.tnode').forEach(n => n.classList.remove('selected'));
+            document.getElementById('inspector').classList.remove('visible');
+            selectedId = null;
+        }
+
+        /* ─── Resize Handler ─── */
+        let resizeTimer;
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(renderTreemap, 150);
+        });
+
+        /* ─── Init ─── */
+        renderTreemap();
+    </script>
+</body>
+</html>
