@@ -8,15 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- CLI profile mode for automated benchmarking (`oxide.exe profile <drive>`)
 
 ### Changed
-- Performance improvements across backend and frontend
-- Release build now uses LTO (Link Time Optimization)
-- Debounced search inputs in TreeView and FileList (150ms)
-- `VecDeque` for LRU cache eviction (O(1) vs O(n))
-- Skip MFT fixup copy when not needed
-- Partial sort for treemap overflow inputs
+
+### Fixed
 
 ## [0.3.0] - 2026-04-27
 
