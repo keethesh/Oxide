@@ -10,6 +10,8 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{BufReader, ErrorKind, Read};
 use std::os::windows::fs::OpenOptionsExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use tauri::Window;
 use windows::core::HRESULT;
@@ -50,7 +52,7 @@ impl fmt::Display for MftScanError {
 
 impl std::error::Error for MftScanError {}
 
-pub fn probe(drive_letter: char) -> Result<(), MftScanError> {
+pub fn probe(drive_letter: char, _cancel_flag: &Arc<AtomicBool>) -> Result<u64, MftScanError> {
     let volume = open_volume(drive_letter)?;
     let sector_size = volume.info.BytesPerSector.max(1) as usize;
     let mut fs = open_volume_reader(drive_letter, sector_size)?;
@@ -102,7 +104,7 @@ pub fn probe(drive_letter: char) -> Result<(), MftScanError> {
         ));
     }
 
-    Ok(())
+    Ok(total_records)
 }
 
 pub fn scan(
@@ -110,7 +112,12 @@ pub fn scan(
     window: &Window,
     progress: &mut ScanProgress,
     started_at: Instant,
+    cancel_flag: &Arc<AtomicBool>,
 ) -> Result<FileTree, MftScanError> {
+    if cancel_flag.load(Ordering::SeqCst) {
+        return Err(MftScanError::new(FallbackReason::ScanCancelled, "Scan cancelled"));
+    }
+
     let volume = open_volume(drive_letter)?;
     let sector_size = volume.info.BytesPerSector.max(1) as usize;
     let mut fs = open_volume_reader(drive_letter, sector_size)?;
@@ -155,6 +162,10 @@ pub fn scan(
     let mut start_record = 0u64;
     let mut last_progress_record = 0u64;
     while start_record < total_records {
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Err(MftScanError::new(FallbackReason::ScanCancelled, "Scan cancelled"));
+        }
+
         let remaining = total_records - start_record;
         let records_this_chunk = remaining.min(CHUNK_RECORDS as u64) as usize;
         let chunk_end = start_record + records_this_chunk as u64;

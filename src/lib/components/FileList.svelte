@@ -2,6 +2,7 @@
   import { untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import type { FilePathRow, FileRow } from "$lib/types";
+  import { formatSize } from "$lib/utils";
 
   const PAGE_SIZE = 200;
   const ROW_HEIGHT = 42;
@@ -11,11 +12,13 @@
     scanLoaded,
     rootId,
     onNavigate,
+    onOpenInExplorer,
     compact = false
   } = $props<{
     scanLoaded: boolean;
     rootId: number;
     onNavigate: (id: number) => void;
+    onOpenInExplorer?: (id: number) => void;
     compact?: boolean;
   }>();
 
@@ -33,6 +36,7 @@
   let scrollTop = $state(0);
   let viewportHeight = $state(320);
   let generation = 0;
+  let searchQuery = $state("");
 
   function observeViewport(node: HTMLDivElement) {
     const resizeObserver = new ResizeObserver((entries) => {
@@ -170,11 +174,20 @@
   );
   const renderedRows = $derived.by(() => {
     const start = startIndex;
-    return files.slice(start, endIndex).map((file, index) => ({
+    const filtered = searchQuery
+      ? files.filter((f) => f.name.toLowerCase().includes(searchQuery.toLowerCase()))
+      : files;
+    return filtered.slice(start, endIndex).map((file, index) => ({
       file,
       top: (start + index) * ROW_HEIGHT
     }));
   });
+
+  const filteredCount = $derived(
+    searchQuery
+      ? files.filter((f) => f.name.toLowerCase().includes(searchQuery.toLowerCase())).length
+      : files.length
+  );
 
   $effect(() => {
     const loaded = scanLoaded;
@@ -243,8 +256,23 @@
 
 <div class:compact class="file-list">
   <div class="heading">
-    <h2>{compact ? "Top Files" : "Largest Files"}</h2>
-    <p>{files.length ? `${files.length.toLocaleString()} indexed` : "Selected scope"}</p>
+    <div class="heading-left">
+      <h2>{compact ? "Top Files" : "Largest Files"}</h2>
+      <p>{files.length ? `${filteredCount.toLocaleString()} of ${files.length.toLocaleString()} files` : "Selected scope"}</p>
+    </div>
+    {#if !compact && files.length > 0}
+      <div class="search-box">
+        <input
+          type="text"
+          placeholder="Filter files..."
+          bind:value={searchQuery}
+          class="search-input"
+        />
+        {#if searchQuery}
+          <button class="search-clear" onclick={() => (searchQuery = "")}>×</button>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   {#if !scanLoaded}
@@ -269,7 +297,12 @@
         <div class="viewport" bind:this={viewport} use:observeViewport onscroll={handleScroll}>
           <div class="canvas" style={`height: ${totalHeight}px`}>
             {#each renderedRows as { file, top } (file.id)}
-              <div class="row" style={`top: ${top}px; height: ${ROW_HEIGHT}px`}>
+              <div
+                class="row"
+                style={`top: ${top}px; height: ${ROW_HEIGHT}px`}
+                role="listitem"
+                oncontextmenu={(e) => { e.preventDefault(); onOpenInExplorer?.(file.id); }}
+              >
                 <button class="name-cell" onclick={() => onNavigate(file.parent_id)}>
                   <span class="name">{file.name}</span>
                   {#if file.is_hidden}
@@ -295,19 +328,7 @@
   {/if}
 </div>
 
-<script lang="ts" module>
-  function formatSize(bytes: number): string {
-    if (bytes === 0) return "0 B";
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    let value = bytes;
-    let unitIndex = 0;
-    while (value >= 1024 && unitIndex < units.length - 1) {
-      value /= 1024;
-      unitIndex += 1;
-    }
-    return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
-  }
-</script>
+
 
 <style>
   .file-list {
@@ -330,6 +351,12 @@
     justify-content: space-between;
     gap: 0.75rem;
     min-height: 28px;
+  }
+
+  .heading-left {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
   }
 
   .heading h2,
@@ -497,6 +524,50 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     white-space: nowrap;
+  }
+
+  .search-box {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+
+  .search-input {
+    width: 160px;
+    appearance: none;
+    border: 1px solid rgba(223, 245, 154, 0.12);
+    border-radius: 6px;
+    background: var(--surface-1);
+    color: #e8e2d6;
+    font-size: 0.72rem;
+    padding: 0.28rem 1.8rem 0.28rem 0.6rem;
+    transition: border-color 140ms var(--ease), width 200ms var(--ease);
+  }
+
+  .search-input::placeholder {
+    color: var(--dim);
+  }
+
+  .search-input:focus {
+    outline: none;
+    border-color: rgba(223, 245, 154, 0.3);
+    width: 200px;
+  }
+
+  .search-clear {
+    position: absolute;
+    right: 6px;
+    border: none;
+    background: transparent;
+    color: var(--dim);
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0 2px;
+  }
+
+  .search-clear:hover {
+    color: var(--muted);
   }
 
   @media (max-width: 760px) {

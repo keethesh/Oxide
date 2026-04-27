@@ -3,6 +3,16 @@ export interface DriveInfo {
   label: string;
   filesystem: string;
   supported: boolean;
+  total_bytes?: number;
+  free_bytes?: number;
+}
+
+export interface PrepareScanResult {
+  action: "Scan" | "Relaunching";
+  mode?: "Mft" | "Filesystem";
+  fallback_reason?: string;
+  pending_drive?: string;
+  total_items_estimate?: number;
 }
 
 export interface ScanProgress {

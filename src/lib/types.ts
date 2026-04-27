@@ -5,13 +5,16 @@ export type FallbackReason =
   | "mft_probe_timeout"
   | "mft_read_error"
   | "mft_parse_error"
-  | "mft_access_denied";
+  | "mft_access_denied"
+  | "scan_cancelled";
 
 export interface DriveInfo {
   letter: string;
   label: string;
   filesystem: string;
   supported: boolean;
+  total_bytes: number;
+  free_bytes: number;
 }
 
 export interface PrepareScanResult {
@@ -19,6 +22,7 @@ export interface PrepareScanResult {
   mode: ScanMode | null;
   fallback_reason: FallbackReason | null;
   pending_drive: string | null;
+  total_items_estimate: number | null;
 }
 
 export interface LaunchScanRequest {

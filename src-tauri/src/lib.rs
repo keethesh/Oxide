@@ -15,6 +15,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use treemap::layout::{self, LayoutInput, LayoutRect, LayoutRectKind, Rect};
@@ -31,6 +32,7 @@ pub struct AppState {
     treemap_layout_cache: Arc<Mutex<TreemapLayoutCache>>,
     prepared_scan: Mutex<Option<PreparedScanState>>,
     launch_scan_request: Mutex<Option<String>>,
+    scan_cancelled: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +126,49 @@ fn list_drives() -> Vec<mft::volume::DriveInfo> {
 }
 
 #[tauri::command]
+fn cancel_scan(state: tauri::State<'_, AppState>) {
+    state.scan_cancelled.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+async fn open_in_explorer(
+    state: tauri::State<'_, AppState>,
+    node_id: u32,
+) -> Result<(), String> {
+    let tree = state.tree.clone();
+    let path = tokio::task::spawn_blocking(move || {
+        let tree = tree.read().unwrap();
+        tree.get_full_path(node_id)
+    })
+    .await
+    .map_err(|err| format!("Path query task failed: {err}"))?;
+
+    open_path_in_explorer(&path)?;
+    Ok(())
+}
+
+fn open_path_in_explorer(path: &str) -> Result<(), String> {
+    let wide_path = to_wide(path);
+    let operation = to_wide("open");
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(wide_path.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    if result.0 as usize <= 32 {
+        Err("Failed to open path in Explorer".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[tauri::command]
 fn prepare_scan(
     state: tauri::State<'_, AppState>,
     drive_letter: String,
@@ -140,8 +185,7 @@ fn prepare_scan(
     }
 
     let result = if is_process_elevated()? {
-        let probe_result = scan::mft::probe(drive_letter_char(&drive_letter))
-            .map(|_| ())
+        let probe_result = scan::mft::probe(drive_letter_char(&drive_letter), &state.scan_cancelled)
             .map_err(|error| error.reason);
         plan_elevated_prepare_result(probe_result)
     } else {
@@ -186,6 +230,9 @@ async fn scan_drive(
     let root_path = PathBuf::from(format!("{drive_letter}\\"));
     let window_clone = window.clone();
     let drive_letter_clone = drive_letter.clone();
+    let cancel_flag = state.scan_cancelled.clone();
+
+    cancel_flag.store(false, Ordering::SeqCst);
 
     let (tree, mut result) = tokio::task::spawn_blocking(move || {
         run_scan(
@@ -195,6 +242,7 @@ async fn scan_drive(
             root_path,
             mode,
             fallback_reason,
+            &cancel_flag,
         )
     })
     .await
@@ -539,6 +587,7 @@ pub fn run() {
             ))),
             prepared_scan: Mutex::new(None),
             launch_scan_request: Mutex::new(parse_launch_scan_request()),
+            scan_cancelled: Arc::new(AtomicBool::new(false)),
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -546,6 +595,8 @@ pub fn run() {
             prepare_scan,
             get_launch_scan_request,
             scan_drive,
+            cancel_scan,
+            open_in_explorer,
             get_children,
             get_largest_files,
             get_file_paths,
@@ -563,17 +614,25 @@ fn run_scan(
     root_path: PathBuf,
     requested_mode: ScanMode,
     initial_fallback: Option<FallbackReason>,
+    cancel_flag: &Arc<AtomicBool>,
 ) -> Result<(FileTree, ScanResult), String> {
     let started_at = Instant::now();
     let mut progress = ScanProgress::new("Preparing scan", Some(requested_mode));
     progress.fallback_reason = initial_fallback;
     scan::emit_progress(window, &mut progress, started_at);
 
+    if cancel_flag.load(Ordering::SeqCst) {
+        return Err("Scan cancelled".to_string());
+    }
+
     let scan_started_at = Instant::now();
     let (mut tree, actual_mode, fallback_reason) = match requested_mode {
-        ScanMode::Mft => match scan::mft::scan(drive, window, &mut progress, started_at) {
+        ScanMode::Mft => match scan::mft::scan(drive, window, &mut progress, started_at, cancel_flag) {
             Ok(tree) => (tree, ScanMode::Mft, initial_fallback),
             Err(error) => {
+                if cancel_flag.load(Ordering::SeqCst) {
+                    return Err("Scan cancelled".to_string());
+                }
                 progress = ScanProgress::new(
                     "Switching to slower filesystem fallback",
                     Some(ScanMode::Filesystem),
@@ -587,7 +646,7 @@ fn run_scan(
                 scan::emit_progress(window, &mut fallback_progress, started_at);
 
                 let tree =
-                    scan::filesystem::scan(root_path, window, &mut fallback_progress, started_at)
+                    scan::filesystem::scan(root_path, window, &mut fallback_progress, started_at, cancel_flag)
                         .map_err(|err| format!("Failed to scan {}: {err}", drive_letter))?;
                 progress = fallback_progress;
                 (tree, ScanMode::Filesystem, Some(error.reason))
@@ -598,7 +657,7 @@ fn run_scan(
             progress.scan_mode = Some(ScanMode::Filesystem);
             scan::emit_progress(window, &mut progress, started_at);
 
-            let tree = scan::filesystem::scan(root_path, window, &mut progress, started_at)
+            let tree = scan::filesystem::scan(root_path, window, &mut progress, started_at, cancel_flag)
                 .map_err(|err| format!("Failed to scan {}: {err}", drive_letter))?;
             (tree, ScanMode::Filesystem, initial_fallback)
         }
@@ -653,10 +712,10 @@ fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
 }
 
-fn plan_elevated_prepare_result(probe_result: Result<(), FallbackReason>) -> PrepareScanResult {
+fn plan_elevated_prepare_result(probe_result: Result<u64, FallbackReason>) -> PrepareScanResult {
     match probe_result {
-        Ok(()) => PrepareScanResult::scan(ScanMode::Mft, None),
-        Err(reason) => PrepareScanResult::scan(ScanMode::Filesystem, Some(reason)),
+        Ok(total_items) => PrepareScanResult::scan(ScanMode::Mft, None, Some(total_items)),
+        Err(reason) => PrepareScanResult::scan(ScanMode::Filesystem, Some(reason), None),
     }
 }
 
@@ -667,7 +726,7 @@ fn plan_unelevated_prepare_result(
     if relaunch_succeeded {
         PrepareScanResult::relaunching(drive_letter)
     } else {
-        PrepareScanResult::scan(ScanMode::Filesystem, Some(FallbackReason::UacDeclined))
+        PrepareScanResult::scan(ScanMode::Filesystem, Some(FallbackReason::UacDeclined), None)
     }
 }
 
@@ -982,11 +1041,12 @@ mod tests {
 
     #[test]
     fn ntfs_plus_elevated_chooses_mft_mode() {
-        let result = plan_elevated_prepare_result(Ok(()));
+        let result = plan_elevated_prepare_result(Ok(1_000_000));
 
         assert_eq!(result.action, PrepareScanAction::Scan);
         assert_eq!(result.mode, Some(ScanMode::Mft));
         assert_eq!(result.fallback_reason, None);
+        assert_eq!(result.total_items_estimate, Some(1_000_000));
     }
 
     #[test]

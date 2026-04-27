@@ -2,6 +2,7 @@
   import { untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import type { ChildPage, NodeSummary } from "$lib/types";
+  import { formatSize } from "$lib/utils";
 
   const PAGE_SIZE = 200;
   const ROW_HEIGHT = 34;
@@ -48,6 +49,7 @@
   let scrollTop = $state(0);
   let viewportHeight = $state(320);
   let generation = 0;
+  let searchQuery = $state("");
 
   function isExpanded(id: number) {
     return expanded.has(id);
@@ -228,20 +230,32 @@
     }
 
     const rows: VisibleRow[] = [];
+    const query = searchQuery.toLowerCase();
+
     for (const node of page.items) {
-      rows.push({
-        key: `node:${node.id}`,
-        kind: "node",
-        depth,
-        node
-      });
+      const matchesQuery = query && node.name.toLowerCase().includes(query);
+      const shouldShow = !query || matchesQuery || (node.is_dir && hasMatchingDescendant(node.id, query));
+
+      if (shouldShow) {
+        rows.push({
+          key: `node:${node.id}`,
+          kind: "node",
+          depth,
+          node
+        });
+      }
 
       if (node.is_dir && isExpanded(node.id)) {
-        rows.push(...buildVisibleRows(node.id, depth + 1));
+        const childRows = buildVisibleRows(node.id, depth + 1);
+        if (query) {
+          rows.push(...childRows);
+        } else {
+          rows.push(...childRows);
+        }
       }
     }
 
-    if (page.nextOffset !== null) {
+    if (page.nextOffset !== null && !query) {
       rows.push({
         key: `more:${parentId}:${page.items.length}`,
         kind: "load-more",
@@ -254,9 +268,33 @@
     return rows;
   }
 
-  const visibleRows = $derived.by(() =>
-    scanLoaded ? buildVisibleRows(scanRootId, 0) : []
-  );
+  function hasMatchingDescendant(parentId: number, query: string): boolean {
+    const page = getChildren(parentId);
+    if (!page) {
+      return false;
+    }
+    for (const node of page.items) {
+      if (node.name.toLowerCase().includes(query)) {
+        return true;
+      }
+      if (node.is_dir && hasMatchingDescendant(node.id, query)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const visibleRows = $derived.by(() => {
+    if (!scanLoaded) return [];
+    const rows = buildVisibleRows(scanRootId, 0);
+    if (searchQuery) {
+      return rows.filter(row => {
+        if (row.kind !== "node") return true;
+        return row.node.name.toLowerCase().includes(searchQuery.toLowerCase()) || hasMatchingDescendant(row.node.id, searchQuery.toLowerCase());
+      });
+    }
+    return rows;
+  });
   const totalHeight = $derived(Math.max(visibleRows.length * ROW_HEIGHT, ROW_HEIGHT));
   const startIndex = $derived(Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN));
   const endIndex = $derived(
@@ -302,8 +340,23 @@
 
 <div class="tree-view">
   <div class="heading">
-    <h2>Folders</h2>
-    <p>Hierarchy</p>
+    <div class="heading-left">
+      <h2>Folders</h2>
+      <p>Hierarchy</p>
+    </div>
+    {#if visibleRows.length > 0}
+      <div class="search-box">
+        <input
+          type="text"
+          placeholder="Filter folders..."
+          bind:value={searchQuery}
+          class="search-input"
+        />
+        {#if searchQuery}
+          <button class="search-clear" onclick={() => (searchQuery = "")}>×</button>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   {#if error}
@@ -373,19 +426,7 @@
   {/if}
 </div>
 
-<script lang="ts" module>
-  function formatSize(bytes: number): string {
-    if (bytes === 0) return "0 B";
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    let value = bytes;
-    let unitIndex = 0;
-    while (value >= 1024 && unitIndex < units.length - 1) {
-      value /= 1024;
-      unitIndex += 1;
-    }
-    return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
-  }
-</script>
+
 
 <style>
   .tree-view {
@@ -404,6 +445,12 @@
     justify-content: space-between;
     gap: 0.75rem;
     min-height: 28px;
+  }
+
+  .heading-left {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
   }
 
   .heading h2,
@@ -564,5 +611,49 @@
 
   .load-more:hover:not(:disabled) {
     color: #f2b16f;
+  }
+
+  .search-box {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+
+  .search-input {
+    width: 140px;
+    appearance: none;
+    border: 1px solid rgba(223, 245, 154, 0.12);
+    border-radius: 6px;
+    background: var(--surface-1);
+    color: #e8e2d6;
+    font-size: 0.72rem;
+    padding: 0.28rem 1.8rem 0.28rem 0.6rem;
+    transition: border-color 140ms var(--ease), width 200ms var(--ease);
+  }
+
+  .search-input::placeholder {
+    color: var(--dim);
+  }
+
+  .search-input:focus {
+    outline: none;
+    border-color: rgba(223, 245, 154, 0.3);
+    width: 180px;
+  }
+
+  .search-clear {
+    position: absolute;
+    right: 6px;
+    border: none;
+    background: transparent;
+    color: var(--dim);
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0 2px;
+  }
+
+  .search-clear:hover {
+    color: var(--muted);
   }
 </style>

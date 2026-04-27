@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { fade } from "svelte/transition";
   import { listen } from "@tauri-apps/api/event";
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import FileList from "$lib/components/FileList.svelte";
@@ -27,6 +28,8 @@
   let drivesLoading = $state(true);
   let scanStartedAt = $state<number | null>(null);
   let liveDurationMs = $state(0);
+  let navHistory = $state<number[]>([]);
+  let totalItemsEstimate = $state<number | null>(null);
   const tauriAvailable = isTauri();
 
   async function loadDrives() {
@@ -83,6 +86,7 @@
         throw new Error("prepare_scan returned no scan mode");
       }
 
+      totalItemsEstimate = preparation.total_items_estimate ?? null;
       resetScanState();
       progress = idleProgress(initialPhase(mode), mode, preparation.fallback_reason);
       status = preparation.fallback_reason
@@ -104,10 +108,28 @@
         ? `Scan complete for ${result.drive_letter} using ${modeLabel(result.scan_mode)} after fallback.`
         : `Scan complete for ${result.drive_letter} using ${modeLabel(result.scan_mode)}.`;
     } catch (error) {
-      status = `Scan failed: ${error}`;
+      const errorStr = String(error);
+      if (errorStr.includes("cancelled")) {
+        status = "Scan cancelled.";
+        resetScanState();
+      } else {
+        status = `Scan failed: ${error}`;
+      }
     } finally {
       isScanning = false;
       scanStartedAt = null;
+    }
+  }
+
+  async function cancelScan() {
+    if (!tauriAvailable || !isScanning) {
+      return;
+    }
+    try {
+      await invoke("cancel_scan");
+      status = "Cancelling scan...";
+    } catch (error) {
+      console.error("[oxide] cancel failed", error);
     }
   }
 
@@ -125,7 +147,27 @@
   }
 
   function handleNavigate(id: number) {
+    navHistory = [...navHistory, rootId];
     rootId = id;
+  }
+
+  function goBack() {
+    if (navHistory.length === 0) {
+      return;
+    }
+    const previousId = navHistory[navHistory.length - 1];
+    navHistory = navHistory.slice(0, -1);
+    rootId = previousId;
+  }
+
+  const canGoBack = $derived(navHistory.length > 0);
+
+  async function openInExplorer(id: number) {
+    try {
+      await invoke("open_in_explorer", { nodeId: id });
+    } catch (error) {
+      status = `Failed to open in Explorer: ${error}`;
+    }
   }
 
   function resetScanState() {
@@ -133,6 +175,8 @@
     rootId = 0;
     breadcrumbPath = [];
     activeTab = "treemap";
+    navHistory = [];
+    totalItemsEstimate = null;
   }
 
   $effect(() => {
@@ -335,10 +379,20 @@
       return 100;
     }
 
-    if (!isScanning) {
+if (!isScanning) {
       return 0;
     }
 
+    // If we have a total items estimate, use it for progress calculation
+    if (totalItemsEstimate && totalItemsEstimate > 0) {
+      const totalScanned = progress.dirs_scanned + progress.files_scanned;
+      const normalized = Math.min(1, totalScanned / totalItemsEstimate);
+      // Apply easing for smoother visual progress
+      const eased = 1 - (1 - normalized) ** 2;
+      return Math.min(94, eased * 94);
+    }
+
+    // Fallback to time-based estimate
     const elapsedSeconds = liveDurationMs / 1000;
     const expectedScanSeconds = currentScanMode === "filesystem" ? 55 : 24;
     const normalized = Math.min(1, elapsedSeconds / expectedScanSeconds);
@@ -424,31 +478,54 @@
       <button
         class:scanning={isScanning}
         class="hud-btn primary scan-action"
-        disabled={!selectedDriveInfo?.supported || isScanning || drivesLoading}
-        onclick={() => scan()}
+        disabled={!selectedDriveInfo?.supported || drivesLoading || (isScanning ? false : !selectedDriveInfo?.supported)}
+        onclick={() => isScanning ? cancelScan() : scan()}
       >
-        <svg
-          class:active={isScanning}
-          class="scan-icon"
-          aria-hidden="true"
-          viewBox="0 0 24 24"
-          fill="none"
-        >
-          <path
-            d="M20 12a8 8 0 1 1-2.34-5.66"
-            stroke="currentColor"
-            stroke-width="2.4"
-            stroke-linecap="round"
-          />
-          <path
-            d="M20 4v6h-6"
-            stroke="currentColor"
-            stroke-width="2.4"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
-        {isScanning ? "Scanning" : "Scan"}
+        {#if isScanning}
+          <svg
+            class="scan-icon active"
+            aria-hidden="true"
+            viewBox="0 0 24 24"
+            fill="none"
+          >
+            <path
+              d="M20 12a8 8 0 1 1-2.34-5.66"
+              stroke="currentColor"
+              stroke-width="2.4"
+              stroke-linecap="round"
+            />
+            <path
+              d="M20 4v6h-6"
+              stroke="currentColor"
+              stroke-width="2.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          Cancel
+        {:else}
+          <svg
+            class="scan-icon"
+            aria-hidden="true"
+            viewBox="0 0 24 24"
+            fill="none"
+          >
+            <path
+              d="M20 12a8 8 0 1 1-2.34-5.66"
+              stroke="currentColor"
+              stroke-width="2.4"
+              stroke-linecap="round"
+            />
+            <path
+              d="M20 4v6h-6"
+              stroke="currentColor"
+              stroke-width="2.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          Scan
+        {/if}
       </button>
     </div>
   </header>
@@ -469,8 +546,8 @@
         <strong>{selectedDriveInfo.letter} is {selectedDriveInfo.filesystem}</strong>
         <span>Oxide currently scans NTFS volumes.</span>
       </section>
-    {:else if isScanning}
-      <section class="scan-board" aria-label="Scan in progress">
+{:else if isScanning}
+      <section class="scan-board" aria-label="Scan in progress" transition:fade={{ duration: 200 }}>
         <div class="scan-core">
           <span class="status-pill">
             <span class:active={isScanning} class="status-dot" aria-hidden="true"></span>
@@ -483,12 +560,19 @@
           </div>
         </div>
       </section>
-    {:else if scanResult}
-      <div class="workspace">
+{:else if scanResult}
+      <div class="workspace" transition:fade={{ duration: 300 }}>
         <section class="visual-stage" aria-label="Disk visualization">
           <div class="stage-toolbar">
             <div class="stage-context">
-              <span>{activeTab === "treemap" ? `Space map - ${scanResult.drive_letter}` : "Largest files"}</span>
+              <div class="stage-title-row">
+                {#if canGoBack}
+                  <button class="back-btn" onclick={goBack} title="Go back" aria-label="Go back">
+                    <span class="icon-back" aria-hidden="true"></span>
+                  </button>
+                {/if}
+                <span>{activeTab === "treemap" ? `Space map - ${scanResult.drive_letter}` : "Largest files"}</span>
+              </div>
               <div class="breadcrumb">
                 {#each breadcrumbPath as [id, name], index (id)}
                   {#if index > 0}
@@ -513,7 +597,7 @@
             {#if activeTab === "treemap"}
               <Treemap {rootId} onNavigate={handleNavigate} />
             {:else}
-              <FileList scanLoaded={true} {rootId} onNavigate={handleNavigate} compact={false} />
+              <FileList scanLoaded={true} {rootId} onNavigate={handleNavigate} onOpenInExplorer={openInExplorer} compact={false} />
             {/if}
           </div>
 
@@ -531,7 +615,7 @@
           </section>
 
           <section class="inspector" aria-label="Largest files">
-            <FileList scanLoaded={true} {rootId} onNavigate={handleNavigate} compact />
+            <FileList scanLoaded={true} {rootId} onNavigate={handleNavigate} onOpenInExplorer={openInExplorer} compact />
           </section>
         </aside>
       </div>
@@ -555,11 +639,16 @@
                 selectedDrive = drive.letter;
               }}
             >
-              <span>
+              <span class="drive-info">
                 <strong>{drive.letter}</strong>
                 <small>{drive.label}</small>
               </span>
-              <em>{drive.supported ? drive.filesystem : `${drive.filesystem} unsupported`}</em>
+              <span class="drive-meta">
+                <em>{drive.supported ? drive.filesystem : `${drive.filesystem} unsupported`}</em>
+                {#if drive.supported && drive.total_bytes > 0}
+                  <span class="drive-space">{formatSize(drive.free_bytes)} free of {formatSize(drive.total_bytes)}</span>
+                {/if}
+              </span>
             </button>
           {/each}
         </div>
@@ -650,6 +739,12 @@
     background: #343b2e;
     border: 2px solid #10130f;
     border-radius: 999px;
+  }
+
+  /* Firefox scrollbar support */
+  :global(*) {
+    scrollbar-width: thin;
+    scrollbar-color: #343b2e transparent;
   }
 
   .app-shell {
@@ -1016,6 +1111,43 @@
     text-transform: uppercase;
   }
 
+  .stage-title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .back-btn {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface-1);
+    color: var(--muted);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 140ms var(--ease), color 140ms var(--ease);
+  }
+
+  .back-btn:hover {
+    background: var(--surface-2);
+    color: var(--accent);
+  }
+
+  .icon-back {
+    width: 12px;
+    height: 12px;
+    display: block;
+    border: 2px solid currentColor;
+    border-top: 0;
+    border-right: 0;
+    box-sizing: border-box;
+    transform: rotate(45deg);
+    margin-left: 2px;
+  }
+
   .breadcrumb {
     display: flex;
     align-items: center;
@@ -1297,6 +1429,18 @@
     font-style: normal;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .drive-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    align-items: flex-end;
+  }
+
+  .drive-space {
+    font-size: 0.7rem;
+    color: var(--dim);
   }
 
   .drive-board em {

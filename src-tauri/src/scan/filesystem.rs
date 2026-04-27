@@ -5,6 +5,8 @@ use crate::scan::progress::ScanProgress;
 use std::fs;
 use std::os::windows::fs::MetadataExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use tauri::Window;
 use windows::Win32::Storage::FileSystem::{
@@ -17,12 +19,21 @@ pub fn scan(
     window: &Window,
     progress: &mut ScanProgress,
     started_at: Instant,
+    cancel_flag: &Arc<AtomicBool>,
 ) -> Result<FileTree, String> {
+    if cancel_flag.load(Ordering::SeqCst) {
+        return Err("Scan cancelled".to_string());
+    }
+
     let root_name = root_path.to_string_lossy().to_string();
     let mut tree = FileTree::with_root(&root_name);
     let mut stack = vec![(root_path, tree.root_id())];
 
     while let Some((path, parent_id)) = stack.pop() {
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Err("Scan cancelled".to_string());
+        }
+
         progress.phase = format!("Walking {}", path.display());
         emit_progress(window, progress, started_at);
 
@@ -32,6 +43,10 @@ pub fn scan(
         };
 
         for entry in entries.flatten() {
+            if cancel_flag.load(Ordering::SeqCst) {
+                return Err("Scan cancelled".to_string());
+            }
+
             let child_path = entry.path();
             let metadata = match fs::symlink_metadata(&child_path) {
                 Ok(metadata) => metadata,

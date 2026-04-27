@@ -15,6 +15,7 @@ pub enum FallbackReason {
     MftReadError,
     MftParseError,
     MftAccessDenied,
+    ScanCancelled,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -30,6 +31,7 @@ pub struct PrepareScanResult {
     pub mode: Option<ScanMode>,
     pub fallback_reason: Option<FallbackReason>,
     pub pending_drive: Option<String>,
+    pub total_items_estimate: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,12 +62,13 @@ pub struct ScanTimings {
 }
 
 impl PrepareScanResult {
-    pub fn scan(mode: ScanMode, fallback_reason: Option<FallbackReason>) -> Self {
+    pub fn scan(mode: ScanMode, fallback_reason: Option<FallbackReason>, total_items_estimate: Option<u64>) -> Self {
         Self {
             action: PrepareScanAction::Scan,
             mode: Some(mode),
             fallback_reason,
             pending_drive: None,
+            total_items_estimate,
         }
     }
 
@@ -75,6 +78,7 @@ impl PrepareScanResult {
             mode: None,
             fallback_reason: None,
             pending_drive: Some(drive_letter),
+            total_items_estimate: None,
         }
     }
 }

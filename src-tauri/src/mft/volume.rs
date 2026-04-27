@@ -4,9 +4,9 @@ use std::os::windows::ffi::OsStrExt;
 use windows::core::{Result, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, GetDriveTypeW, GetLogicalDriveStringsW, GetVolumeInformationW,
-    FILE_FLAG_OVERLAPPED, FILE_FLAG_SEQUENTIAL_SCAN, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    OPEN_EXISTING,
+    CreateFileW, GetDriveTypeW, GetDiskFreeSpaceExW, GetLogicalDriveStringsW,
+    GetVolumeInformationW, FILE_FLAG_OVERLAPPED, FILE_FLAG_SEQUENTIAL_SCAN, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{FSCTL_GET_NTFS_VOLUME_DATA, NTFS_VOLUME_DATA_BUFFER};
 use windows::Win32::System::IO::DeviceIoControl;
@@ -27,6 +27,8 @@ pub struct DriveInfo {
     pub label: String,
     pub filesystem: String,
     pub supported: bool,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
 }
 
 // Safety: Windows HANDLEs can be sent between threads.
@@ -169,17 +171,40 @@ fn drive_info_from_root(root: &str) -> Option<DriveInfo> {
         format!("{volume_label} ({letter})")
     };
 
+    let (total_bytes, free_bytes) = get_drive_space(root).unwrap_or((0, 0));
+
     Some(DriveInfo {
         letter,
         label,
         supported: filesystem.eq_ignore_ascii_case("NTFS"),
         filesystem,
+        total_bytes,
+        free_bytes,
     })
 }
 
 fn wide_buf_to_string(buf: &[u16]) -> String {
     let len = buf.iter().position(|ch| *ch == 0).unwrap_or(buf.len());
     String::from_utf16_lossy(&buf[..len])
+}
+
+fn get_drive_space(root: &str) -> Option<(u64, u64)> {
+    let wide_root = to_wide(root);
+    let mut free_bytes_available = 0u64;
+    let mut total_bytes = 0u64;
+    let mut total_free_bytes = 0u64;
+
+    unsafe {
+        GetDiskFreeSpaceExW(
+            PCWSTR(wide_root.as_ptr()),
+            Some(&mut free_bytes_available as *mut u64 as *mut _),
+            Some(&mut total_bytes as *mut u64 as *mut _),
+            Some(&mut total_free_bytes as *mut u64 as *mut _),
+        )
+    }
+    .ok()?;
+
+    Some((total_bytes, free_bytes_available))
 }
 
 fn to_wide(value: &str) -> Vec<u16> {
