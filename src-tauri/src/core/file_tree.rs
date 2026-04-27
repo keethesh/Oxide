@@ -1,6 +1,7 @@
 use super::arena::StringArena;
 use super::file_entry::{FileEntry, FileFlags};
 use serde::Serialize;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -168,9 +169,17 @@ impl FileTree {
         }
 
         let entry = &self.entries[id as usize];
-        self.names
-            .get(entry.name_offset, entry.name_len)
-            .to_string()
+        self.names.get(entry.name_offset, entry.name_len).to_string()
+    }
+
+    /// Returns the node name as a borrowed string to avoid allocation
+    /// when the caller only needs to read the name.
+    pub fn node_name_ref(&self, id: u32) -> Cow<'_, str> {
+        if id as usize >= self.entries.len() {
+            return Cow::Borrowed("");
+        }
+        let entry = &self.entries[id as usize];
+        Cow::Borrowed(self.names.get(entry.name_offset, entry.name_len))
     }
 
     pub fn has_node(&self, id: u32) -> bool {
@@ -267,9 +276,16 @@ impl FileTree {
     }
 
     pub fn get_file_path(&self, id: u32) -> Vec<(u32, String)> {
-        let mut path = Vec::new();
+        // Count depth first to avoid repeated Vec growth
+        let mut depth = 0usize;
         let mut current = id;
+        while current != FileEntry::NULL_INDEX && (current as usize) < self.entries.len() {
+            depth += 1;
+            current = self.entries[current as usize].parent_index;
+        }
 
+        let mut path = Vec::with_capacity(depth);
+        current = id;
         while current != FileEntry::NULL_INDEX && (current as usize) < self.entries.len() {
             let name = self.display_name(current);
             if current == self.root_id() || (!name.is_empty() && name != "\\") {
@@ -288,7 +304,21 @@ impl FileTree {
             return String::new();
         }
 
-        let mut full_path = String::new();
+        // Pre-calculate total length to avoid reallocations
+        let total_len: usize = path
+            .iter()
+            .enumerate()
+            .map(|(i, (_, part))| {
+                if i == 0 {
+                    part.len()
+                } else {
+                    // separator + part
+                    1 + part.len()
+                }
+            })
+            .sum();
+
+        let mut full_path = String::with_capacity(total_len);
         for (index, (_, part)) in path.iter().enumerate() {
             if index == 0 {
                 full_path.push_str(part);
@@ -410,14 +440,17 @@ impl FileTree {
 
     pub fn display_name(&self, id: u32) -> String {
         if id == self.root_id() {
-            return self.get_node_name(id).trim_end_matches('\\').to_string();
+            return self
+                .node_name_ref(id)
+                .trim_end_matches('\\')
+                .to_string();
         }
 
-        let name = self.get_node_name(id);
-        if name.is_empty() || name == "." {
+        let name = self.node_name_ref(id);
+        if name.is_empty() || name.as_ref() == "." {
             "\\".to_string()
         } else {
-            name
+            name.into_owned()
         }
     }
 }

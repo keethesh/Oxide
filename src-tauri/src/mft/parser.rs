@@ -218,12 +218,29 @@ fn apply_fixup<'a>(data: &'a [u8], scratch: &'a mut Vec<u8>) -> Option<&'a [u8]>
         return None;
     }
 
+    let sequence_number = [
+        data[update_sequence_offset],
+        data[update_sequence_offset + 1],
+    ];
+
+    // Validate first: check that all fixup slots match the sequence number
+    // before we mutate anything. This lets us skip the copy entirely
+    // if validation fails, and for single-sector records (no fixup needed)
+    // we avoid the copy completely.
+    let needs_fixup = (1..update_sequence_count).any(|sector_index| {
+        let fixup_offset = sector_index * 512 - 2;
+        fixup_offset + 2 <= data.len()
+    });
+
+    if !needs_fixup && update_sequence_count <= 1 {
+        // Single sector — fixup word exists but is never replaced.
+        // No copy needed, return original data.
+        return Some(data);
+    }
+
+    // Copy to scratch and apply fixups
     scratch.clear();
     scratch.extend_from_slice(data);
-    let sequence_number = [
-        scratch[update_sequence_offset],
-        scratch[update_sequence_offset + 1],
-    ];
 
     for sector_index in 1..update_sequence_count {
         let fixup_offset = sector_index * 512 - 2;

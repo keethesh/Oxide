@@ -50,6 +50,19 @@
   let viewportHeight = $state(320);
   let generation = 0;
   let searchQuery = $state("");
+  let debouncedQuery = $state("");
+  let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function handleSearchInput(value: string) {
+    searchQuery = value;
+    if (searchDebounceTimer) {
+      clearTimeout(searchDebounceTimer);
+    }
+    searchDebounceTimer = setTimeout(() => {
+      debouncedQuery = value;
+      searchDebounceTimer = null;
+    }, 150);
+  }
 
   function isExpanded(id: number) {
     return expanded.has(id);
@@ -287,10 +300,11 @@
   const visibleRows = $derived.by(() => {
     if (!scanLoaded) return [];
     const rows = buildVisibleRows(scanRootId, 0);
-    if (searchQuery) {
+    if (debouncedQuery) {
+      const q = debouncedQuery.toLowerCase();
       return rows.filter(row => {
         if (row.kind !== "node") return true;
-        return row.node.name.toLowerCase().includes(searchQuery.toLowerCase()) || hasMatchingDescendant(row.node.id, searchQuery.toLowerCase());
+        return row.node.name.toLowerCase().includes(q) || hasMatchingDescendant(row.node.id, q);
       });
     }
     return rows;
@@ -349,11 +363,12 @@
         <input
           type="text"
           placeholder="Filter folders..."
-          bind:value={searchQuery}
+          value={searchQuery}
+          oninput={(e) => handleSearchInput(e.currentTarget.value)}
           class="search-input"
         />
         {#if searchQuery}
-          <button class="search-clear" onclick={() => (searchQuery = "")}>×</button>
+          <button class="search-clear" onclick={() => { searchQuery = ""; debouncedQuery = ""; if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); searchDebounceTimer = null; } }}>×</button>
         {/if}
       </div>
     {/if}

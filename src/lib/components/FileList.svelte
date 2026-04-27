@@ -37,6 +37,19 @@
   let viewportHeight = $state(320);
   let generation = 0;
   let searchQuery = $state("");
+  let debouncedQuery = $state("");
+  let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function handleSearchInput(value: string) {
+    searchQuery = value;
+    if (searchDebounceTimer) {
+      clearTimeout(searchDebounceTimer);
+    }
+    searchDebounceTimer = setTimeout(() => {
+      debouncedQuery = value;
+      searchDebounceTimer = null;
+    }, 150);
+  }
 
   function observeViewport(node: HTMLDivElement) {
     const resizeObserver = new ResizeObserver((entries) => {
@@ -174,8 +187,8 @@
   );
   const renderedRows = $derived.by(() => {
     const start = startIndex;
-    const filtered = searchQuery
-      ? files.filter((f) => f.name.toLowerCase().includes(searchQuery.toLowerCase()))
+    const filtered = debouncedQuery
+      ? files.filter((f) => f.name.toLowerCase().includes(debouncedQuery.toLowerCase()))
       : files;
     return filtered.slice(start, endIndex).map((file, index) => ({
       file,
@@ -184,8 +197,8 @@
   });
 
   const filteredCount = $derived(
-    searchQuery
-      ? files.filter((f) => f.name.toLowerCase().includes(searchQuery.toLowerCase())).length
+    debouncedQuery
+      ? files.filter((f) => f.name.toLowerCase().includes(debouncedQuery.toLowerCase())).length
       : files.length
   );
 
@@ -265,11 +278,12 @@
         <input
           type="text"
           placeholder="Filter files..."
-          bind:value={searchQuery}
+          value={searchQuery}
+          oninput={(e) => handleSearchInput(e.currentTarget.value)}
           class="search-input"
         />
         {#if searchQuery}
-          <button class="search-clear" onclick={() => (searchQuery = "")}>×</button>
+          <button class="search-clear" onclick={() => { searchQuery = ""; debouncedQuery = ""; if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); searchDebounceTimer = null; } }}>×</button>
         {/if}
       </div>
     {/if}

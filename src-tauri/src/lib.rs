@@ -10,7 +10,7 @@ use scan::types::{
     FallbackReason, LaunchScanRequest, PrepareScanAction, PrepareScanResult, ScanMode, ScanResult,
     ScanTimings,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -67,7 +67,7 @@ struct CachedLayout {
 #[derive(Debug)]
 struct TreemapLayoutCache {
     entries: HashMap<LayoutCacheKey, CachedLayout>,
-    order: Vec<LayoutCacheKey>,
+    order: VecDeque<LayoutCacheKey>,
     capacity: usize,
 }
 
@@ -75,21 +75,29 @@ impl TreemapLayoutCache {
     fn new(capacity: usize) -> Self {
         Self {
             entries: HashMap::new(),
-            order: Vec::new(),
+            order: VecDeque::new(),
             capacity,
         }
     }
 
     fn get(&mut self, key: &LayoutCacheKey, width: f32, height: f32) -> Option<Vec<LayoutRect>> {
-        let cached = self.entries.get(key)?.clone();
+        // Extract owned data in one block, then release the borrow on self.entries.
+        let (cached_layout, cached_width, cached_height) = {
+            let cached = self.entries.get(key)?;
+            (
+                cached.layout.clone(),
+                cached.width,
+                cached.height,
+            )
+        };
+        let needs_scale = (cached_width - width).abs() >= f32::EPSILON
+            || (cached_height - height).abs() >= f32::EPSILON;
         self.touch(key.clone());
-        Some(scale_layout(
-            &cached.layout,
-            cached.width,
-            cached.height,
-            width,
-            height,
-        ))
+        if needs_scale {
+            Some(scale_layout(&cached_layout, cached_width, cached_height, width, height))
+        } else {
+            Some(cached_layout)
+        }
     }
 
     fn insert(&mut self, key: LayoutCacheKey, width: f32, height: f32, layout: Vec<LayoutRect>) {
@@ -101,11 +109,10 @@ impl TreemapLayoutCache {
                 layout,
             },
         );
-        self.touch(key.clone());
+        self.touch(key);
 
         while self.order.len() > self.capacity {
-            if let Some(oldest_key) = self.order.first().cloned() {
-                self.order.remove(0);
+            if let Some(oldest_key) = self.order.pop_front() {
                 self.entries.remove(&oldest_key);
             }
         }
@@ -118,14 +125,14 @@ impl TreemapLayoutCache {
 
     fn touch(&mut self, key: LayoutCacheKey) {
         self.order.retain(|existing| existing != &key);
-        self.order.push(key);
+        self.order.push_back(key);
     }
 }
 
 #[derive(Debug)]
 struct ChildSortCache {
     entries: HashMap<u32, Arc<[u32]>>,
-    order: Vec<u32>,
+    order: VecDeque<u32>,
     capacity: usize,
 }
 
@@ -133,7 +140,7 @@ impl ChildSortCache {
     fn new(capacity: usize) -> Self {
         Self {
             entries: HashMap::new(),
-            order: Vec::new(),
+            order: VecDeque::new(),
             capacity,
         }
     }
@@ -149,8 +156,7 @@ impl ChildSortCache {
         self.touch(node_id);
 
         while self.order.len() > self.capacity {
-            if let Some(oldest_key) = self.order.first().copied() {
-                self.order.remove(0);
+            if let Some(oldest_key) = self.order.pop_front() {
                 self.entries.remove(&oldest_key);
             }
         }
@@ -163,7 +169,7 @@ impl ChildSortCache {
 
     fn touch(&mut self, node_id: u32) {
         self.order.retain(|existing| existing != &node_id);
-        self.order.push(node_id);
+        self.order.push_back(node_id);
     }
 }
 
@@ -492,16 +498,23 @@ fn build_treemap_inputs(tree: &FileTree, root_id: u32, max_rects: usize) -> Vec<
         child_idx = entry.next_sibling_index;
     }
 
-    candidates.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-
     let mut inputs = Vec::new();
 
     if candidates.len() > max_rects {
+        // Partial sort: only fully sort the top N, avoid sorting the rest
         let overflow_start = max_rects.saturating_sub(1);
+        candidates.select_nth_unstable_by(overflow_start, |a, b| {
+            b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0))
+        });
         let overflow_value: u64 = candidates[overflow_start..]
             .iter()
             .map(|(_, value)| *value)
             .sum();
+
+        // Only sort the top portion we actually use
+        candidates[..overflow_start].sort_unstable_by(|a, b| {
+            b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0))
+        });
 
         for (child_id, value) in candidates.into_iter().take(overflow_start) {
             inputs.push(LayoutInput {
@@ -520,6 +533,8 @@ fn build_treemap_inputs(tree: &FileTree, root_id: u32, max_rects: usize) -> Vec<
         });
         return inputs;
     }
+
+    candidates.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     for (child_id, value) in candidates {
         inputs.push(LayoutInput {
