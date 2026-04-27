@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+### Changed
+- **UX**: Complete UI layout rewrite — simplified from 5-zone to 3-zone layout (header, canvas, footer)
+- **UX**: Dedicated start, scanning, error, and results screens instead of shared canvas zone
+- **UX**: Toggleable sidebar for folder tree view instead of always-visible analysis rail
+- **UX**: Moved debug timings into collapsible panel in bottom bar
+- **UX**: Removed redundant tab controls and duplicate export button
+- **UX**: Replaced internal status strings with user-friendly copy
+- **Perf**: TreeView search improved from O(n²) to O(loaded_nodes) by limiting recursion to expanded children only
+- **Perf**: Increased search debounce from 150ms to 200ms
+- **A11y**: Added proper ARIA attributes throughout (labels, roles, live regions, pressed states)
+- **A11y**: Fixed invalid self-closing tags on non-void HTML elements
+
 ## [0.3.0] - 2026-04-27
 
 ### Added
