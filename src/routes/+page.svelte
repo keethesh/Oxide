@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { fade } from "svelte/transition";
   import { listen } from "@tauri-apps/api/event";
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import FileList from "$lib/components/FileList.svelte";
@@ -16,10 +15,10 @@
     ScanResult
   } from "$lib/types";
 
+  // ── State ──────────────────────────────────────────────────
   let drives = $state<DriveInfo[]>([]);
   let selectedDrive = $state("");
-  let status = $state("Choose an NTFS drive to begin.");
-  let activeTab = $state<"treemap" | "list">("treemap");
+  let activeTab = $state<"treemap" | "files">("treemap");
   let progress = $state<ScanProgress>(idleProgress());
   let scanResult = $state<ScanResult | null>(null);
   let rootId = $state(0);
@@ -30,13 +29,16 @@
   let liveDurationMs = $state(0);
   let navHistory = $state<number[]>([]);
   let totalItemsEstimate = $state<number | null>(null);
+  let showDebugPanel = $state(false);
+  let showSidebar = $state(true);
+  let scanError = $state<string | null>(null);
   const tauriAvailable = isTauri();
 
+  // ── Drive loading ──────────────────────────────────────────
   async function loadDrives() {
     if (!tauriAvailable) {
       drives = [];
       selectedDrive = "";
-      status = "Browser preview mode. Open the Tauri app to scan local drives.";
       drivesLoading = false;
       return;
     }
@@ -44,56 +46,55 @@
     drivesLoading = true;
     try {
       drives = await invoke<DriveInfo[]>("list_drives");
-      selectedDrive = drives.find((drive) => drive.supported)?.letter ?? drives[0]?.letter ?? "";
-      status = drives.length
-        ? "Choose an NTFS drive to begin."
-        : "No local drives were found.";
+      selectedDrive =
+        drives.find((d) => d.supported)?.letter ?? drives[0]?.letter ?? "";
     } catch (error) {
-      status = `Failed to list drives: ${error}`;
+      console.error("[oxide] Failed to list drives:", error);
+      drives = [];
     } finally {
       drivesLoading = false;
     }
   }
 
-  async function scan(requestedDrive = selectedDriveInfo?.letter ?? selectedDrive) {
+  // ── Scanning ───────────────────────────────────────────────
+  async function scan(requestedDrive = selectedDrive) {
     if (!tauriAvailable) {
-      status = "Scan is only available in the Tauri desktop app.";
       return;
     }
 
-    const drive = drives.find((candidate) => candidate.letter === requestedDrive) ?? null;
+    const drive = drives.find((c) => c.letter === requestedDrive) ?? null;
     if (!drive?.supported || isScanning) {
       return;
     }
 
+    scanError = null;
     isScanning = true;
     scanStartedAt = Date.now();
     liveDurationMs = 0;
+
     try {
-      status = `Preparing scan for ${drive.letter}...`;
+      cancelScan();
+      resetScanState();
       const preparation = await invoke<PrepareScanResult>("prepare_scan", {
         driveLetter: drive.letter
       });
 
       if (preparation.action === "relaunching") {
-        progress = idleProgress("Relaunching as administrator");
-        status = `Relaunching ${preparation.pending_drive ?? drive.letter} as administrator...`;
+        progress = idleProgress("Relaunching as admin…");
         return;
       }
 
       const mode = preparation.mode;
       if (!mode) {
-        throw new Error("prepare_scan returned no scan mode");
+        throw new Error("No scan mode available");
       }
 
       totalItemsEstimate = preparation.total_items_estimate ?? null;
-      resetScanState();
-      progress = idleProgress(initialPhase(mode), mode, preparation.fallback_reason);
-      status = preparation.fallback_reason
-        ? `Using slower fallback scan for ${drive.letter}: ${fallbackDescription(preparation.fallback_reason)}`
-        : mode === "mft"
-          ? `Starting fast MFT scan on ${drive.letter}...`
-          : `Starting filesystem scan on ${drive.letter}...`;
+      progress = idleProgress(
+        mode === "mft" ? "Reading MFT…" : "Walking filesystem…",
+        mode,
+        preparation.fallback_reason
+      );
 
       const result = await invoke<ScanResult>("scan_drive", {
         driveLetter: drive.letter,
@@ -102,19 +103,15 @@
 
       scanResult = result;
       liveDurationMs = result.duration_ms;
-      console.info("[oxide] scan profile", result.timings);
       rootId = result.root_id;
-      status = result.fallback_reason
-        ? `Scan complete for ${result.drive_letter} using ${modeLabel(result.scan_mode)} after fallback.`
-        : `Scan complete for ${result.drive_letter} using ${modeLabel(result.scan_mode)}.`;
     } catch (error) {
-      const errorStr = String(error);
-      if (errorStr.includes("cancelled")) {
-        status = "Scan cancelled.";
-        resetScanState();
+      const msg = String(error);
+      if (msg.toLowerCase().includes("cancel")) {
+        scanError = "Scan was cancelled.";
       } else {
-        status = `Scan failed: ${error}`;
+        scanError = `Scan failed: ${extractTauriError(error)}`;
       }
+      resetScanState();
     } finally {
       isScanning = false;
       scanStartedAt = null;
@@ -122,54 +119,98 @@
   }
 
   async function cancelScan() {
-    if (!tauriAvailable || !isScanning) {
-      return;
-    }
+    if (!tauriAvailable || !isScanning) return;
     try {
       await invoke("cancel_scan");
-      status = "Cancelling scan...";
-    } catch (error) {
-      console.error("[oxide] cancel failed", error);
+    } catch {
+      /* already cleaning up */
     }
   }
 
-  async function updateBreadcrumbs() {
-    if (!tauriAvailable || !scanResult) {
-      breadcrumbPath = [];
-      return;
-    }
-
-    try {
-      breadcrumbPath = await invoke<[number, string][]>("get_file_path", { id: rootId });
-    } catch (error) {
-      status = `Failed to load breadcrumb: ${error}`;
-    }
-  }
-
+  // ── Navigation ─────────────────────────────────────────────
   function handleNavigate(id: number) {
     navHistory = [...navHistory, rootId];
     rootId = id;
   }
 
   function goBack() {
-    if (navHistory.length === 0) {
-      return;
-    }
-    const previousId = navHistory[navHistory.length - 1];
+    if (navHistory.length === 0) return;
+    rootId = navHistory[navHistory.length - 1];
     navHistory = navHistory.slice(0, -1);
-    rootId = previousId;
   }
-
   const canGoBack = $derived(navHistory.length > 0);
+
+  function goToBreadcrumb(index: number) {
+    const [id] = breadcrumbPath[index];
+    navHistory = breadcrumbPath.slice(index + 1).map(([bid]) => bid);
+    rootId = id;
+  }
 
   async function openInExplorer(id: number) {
     try {
       await invoke("open_in_explorer", { nodeId: id });
     } catch (error) {
-      status = `Failed to open in Explorer: ${error}`;
+      console.error("[oxide] Failed to open in explorer:", error);
     }
   }
 
+  // ── Breadcrumb sync ────────────────────────────────────────
+  $effect(() => {
+    if (scanResult) {
+      loadBreadcrumbs();
+    }
+  });
+
+  async function loadBreadcrumbs() {
+    if (!tauriAvailable || !scanResult) return;
+    try {
+      breadcrumbPath = await invoke<[number, string][]>("get_file_path", {
+        id: rootId
+      });
+    } catch (err) {
+      console.error("[oxide] Breadcrumb load failed:", err);
+    }
+  }
+
+  // ── Timer ──────────────────────────────────────────────────
+  $effect(() => {
+    if (!isScanning || scanStartedAt === null) return;
+    const started = scanStartedAt;
+    let frame = 0;
+    const tick = () => {
+      liveDurationMs = Math.max(liveDurationMs, Date.now() - started);
+      frame = window.requestAnimationFrame(tick);
+    };
+    tick();
+    return () => window.cancelAnimationFrame(frame);
+  });
+
+  // ── Export snapshot ────────────────────────────────────────
+  async function exportSnapshot() {
+    const lines = [
+      `Oxide — Storage Scan`,
+      `Drive:      ${driveLabel}`,
+      `Status:     ${scanStatusText}`,
+      `Files:      ${activeFiles.toLocaleString()}`,
+      `Folders:    ${activeDirs.toLocaleString()}`,
+      `Size:       ${formatSize(activeBytes)}`,
+      `Duration:   ${durationLabel}`,
+      ...(scanResult
+        ? [
+            `Mode:       ${modeLabel(scanResult.scan_mode)}`,
+            `Profile:    scan ${formatDuration(scanResult.timings.scan_ms)} · aggregate ${formatDuration(scanResult.timings.aggregate_ms)} · index ${formatDuration(scanResult.timings.largest_files_ms)} · store ${formatDuration(scanResult.timings.store_ms)} · total ${formatDuration(scanResult.timings.total_ms)}`
+          ]
+        : [])
+    ];
+
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+    } catch {
+      /* clipboard unavailable */
+    }
+  }
+
+  // ── Reset ──────────────────────────────────────────────────
   function resetScanState() {
     scanResult = null;
     rootId = 0;
@@ -177,70 +218,41 @@
     activeTab = "treemap";
     navHistory = [];
     totalItemsEstimate = null;
+    scanError = null;
   }
 
-  $effect(() => {
-    const currentRoot = rootId;
-    const currentScanRoot = scanResult;
-    if (currentScanRoot) {
-      updateBreadcrumbs();
-    }
-  });
+  function resetApp() {
+    cancelScan();
+    resetScanState();
+    isScanning = false;
+    scanStartedAt = null;
+    progress = idleProgress();
+  }
 
-  $effect(() => {
-    if (!isScanning || scanStartedAt === null) {
-      return;
-    }
-
-    const startedAt = scanStartedAt;
-    let frame = 0;
-    const updateDuration = () => {
-      liveDurationMs = Math.max(liveDurationMs, Date.now() - startedAt);
-      frame = window.requestAnimationFrame(updateDuration);
-    };
-
-    updateDuration();
-
-    return () => {
-      window.cancelAnimationFrame(frame);
-    };
-  });
-
+  // ── Lifecycle ──────────────────────────────────────────────
   onMount(() => {
-    let cleanup = () => {};
-
     if (tauriAvailable) {
-      const unlisten = listen<ScanProgress>("scan-progress", (event) => {
-        progress = event.payload;
+      listen<ScanProgress>("scan-progress", (ev) => {
+        progress = ev.payload;
       });
-      cleanup = () => {
-        void unlisten.then((fn) => fn());
-      };
     }
 
-    void (async () => {
+    (async () => {
       await loadDrives();
-
-      if (!tauriAvailable) {
-        return;
-      }
-
+      if (!tauriAvailable) return;
       try {
-        const launchRequest = await invoke<LaunchScanRequest>("get_launch_scan_request");
-        if (launchRequest.drive_letter) {
-          selectedDrive = launchRequest.drive_letter;
-          await scan(launchRequest.drive_letter);
+        const req = await invoke<LaunchScanRequest>("get_launch_scan_request");
+        if (req.drive_letter) {
+          selectedDrive = req.drive_letter;
+          await scan(req.drive_letter);
         }
-      } catch (error) {
-        status = `Failed to read launch request: ${error}`;
+      } catch (err) {
+        console.error("[oxide] Launch request error:", err);
       }
     })();
-
-    return () => {
-      cleanup();
-    };
   });
 
+  // ── Helpers ────────────────────────────────────────────────
   function idleProgress(
     phase = "Idle",
     scanMode: ScanMode | null = null,
@@ -258,163 +270,101 @@
     };
   }
 
-  function initialPhase(mode: ScanMode): string {
-    return mode === "mft" ? "Reading MFT" : "Walking filesystem";
-  }
-
   function formatSize(bytes: number): string {
     if (bytes === 0) return "0 B";
     const units = ["B", "KB", "MB", "GB", "TB"];
-    let value = bytes;
-    let unitIndex = 0;
-    while (value >= 1024 && unitIndex < units.length - 1) {
-      value /= 1024;
-      unitIndex += 1;
+    let v = bytes;
+    let i = 0;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i += 1;
     }
-    return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+    return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
   }
 
-  function modeLabel(mode: ScanMode | null | undefined): string {
-    switch (mode) {
-      case "mft":
-        return "fast MFT scan";
-      case "filesystem":
-        return "filesystem scan";
-      default:
-        return "idle";
-    }
+  function formatDuration(ms: number): string {
+    if (ms < 1000) return `${ms} ms`;
+    const s = ms / 1000;
+    return s >= 10 ? `${s.toFixed(0)} s` : `${s.toFixed(1)} s`;
   }
 
-  function fallbackDescription(reason: FallbackReason | null | undefined): string {
-    switch (reason) {
-      case "uac_declined":
-        return "administrator access was declined";
-      case "mft_probe_timeout":
-        return "the MFT probe timed out";
-      case "mft_read_error":
-        return "raw MFT reads failed";
-      case "mft_parse_error":
-        return "the MFT data could not be parsed";
-      case "mft_access_denied":
-        return "raw volume access was denied";
-      default:
-        return "";
-    }
+  function modeLabel(mode: ScanMode): string {
+    return mode === "mft" ? "MFT" : "Filesystem";
   }
 
-  function formatDuration(durationMs: number, precise = false): string {
-    if (durationMs < 1000) {
-      return `${durationMs} ms`;
-    }
-
-    const seconds = durationMs / 1000;
-    if (precise) {
-      return `${seconds.toFixed(seconds >= 60 ? 0 : 1)} s`;
-    }
-
-    return `${seconds.toFixed(seconds >= 10 ? 0 : 1)} s`;
+  function extractTauriError(err: unknown): string {
+    const msg = String(err);
+    return msg
+      .replace(/^TAURI: /i, "")
+      .replace(/Error:\s*/, "")
+      .trim();
   }
 
-  function formatProfile(result: ScanResult | null): string {
-    if (!result) {
-      return "";
-    }
-
-    const timings = result.timings;
-    return `Profile: scan ${formatDuration(timings.scan_ms)} · aggregate ${formatDuration(timings.aggregate_ms)} · largest-file index ${formatDuration(timings.largest_files_ms)} · store ${formatDuration(timings.store_ms)} · total ${formatDuration(timings.total_ms)}`;
-  }
-
-  async function exportSnapshot() {
-    const snapshot = [
-      `Oxide scan snapshot`,
-      `Drive: ${scanResult?.drive_letter ?? selectedDriveInfo?.letter ?? (selectedDrive || "none")}`,
-      `Status: ${status}`,
-      `Mode: ${scanModeSummary}`,
-      `Files: ${(scanResult?.files_scanned ?? progress.files_scanned).toLocaleString()}`,
-      `Folders: ${(scanResult?.dirs_scanned ?? progress.dirs_scanned).toLocaleString()}`,
-      `Size: ${formatSize(scanResult?.bytes_scanned ?? progress.bytes_scanned)}`,
-      `Duration: ${visibleDurationLabel}`,
-      profileSummary
-    ].filter(Boolean).join("\n");
-
-    try {
-      await navigator.clipboard?.writeText(snapshot);
-      status = "Scan snapshot copied to clipboard.";
-    } catch {
-      status = snapshot;
-    }
-  }
-
+  // ── Derived ────────────────────────────────────────────────
   const selectedDriveInfo = $derived(
-    drives.find((drive) => drive.letter === selectedDrive) ?? null
+    drives.find((d) => d.letter === selectedDrive) ?? null
   );
+
   const visibleDuration = $derived(
-    isScanning ? Math.max(progress.duration_ms, liveDurationMs) : (scanResult?.duration_ms ?? progress.duration_ms)
-  );
-  const visibleDurationLabel = $derived(formatDuration(visibleDuration, isScanning));
-  const currentScanMode = $derived(scanResult?.scan_mode ?? progress.scan_mode ?? null);
-  const currentFallbackReason = $derived(
-    scanResult?.fallback_reason ?? progress.fallback_reason ?? null
-  );
-  const scanModeSummary = $derived(
-    currentScanMode ? modeLabel(currentScanMode) : "No active scan mode"
-  );
-  const fallbackSummary = $derived(
-    currentFallbackReason ? fallbackDescription(currentFallbackReason) : ""
-  );
-  const profileSummary = $derived(formatProfile(scanResult));
-  const totalItemsScanned = $derived(progress.files_scanned + progress.dirs_scanned);
-  const scanActivityLabel = $derived(
     isScanning
-      ? `${totalItemsScanned.toLocaleString()} entries indexed`
+      ? Math.max(progress.duration_ms, liveDurationMs)
+      : scanResult?.duration_ms ?? progress.duration_ms ?? 0
+  );
+  const durationLabel = $derived(
+    visibleDuration < 1000
+      ? `${visibleDuration} ms`
+      : `${(visibleDuration / 1000).toFixed(visibleDuration >= 10000 ? 0 : 1)} s`
+  );
+
+  const activeFiles = $derived(scanResult?.files_scanned ?? progress.files_scanned);
+  const activeDirs = $derived(scanResult?.dirs_scanned ?? progress.dirs_scanned);
+  const activeBytes = $derived(scanResult?.bytes_scanned ?? progress.bytes_scanned);
+
+  const scanProgressPercent = $derived.by(() => {
+    if (scanResult) return 100;
+    if (!isScanning) return 0;
+    if (totalItemsEstimate && totalItemsEstimate > 0) {
+      const r = (progress.dirs_scanned + progress.files_scanned) / totalItemsEstimate;
+      return Math.min(95, (1 - (1 - Math.min(1, r)) ** 2) * 95);
+    }
+    const elapsedS = liveDurationMs / 1000;
+    const expected = progress.scan_mode === "filesystem" ? 55 : 24;
+    const r = Math.min(1, elapsedS / expected);
+    return Math.min(95, Math.max(4, (1 - (1 - r) ** 2.4) * 95));
+  });
+
+  const driveLabel = $derived(
+    selectedDriveInfo
+      ? `${selectedDriveInfo.letter} · ${selectedDriveInfo.label}`
+      : selectedDrive
+  );
+
+  const scanStatusText = $derived(
+    isScanning
+      ? `${progress.phase} · ${durationLabel}`
+      : scanResult
+        ? `Done · ${durationLabel}`
+        : "Ready"
+  );
+
+  const scanPercentLabel = $derived(
+    scanProgressPercent >= 100 ? "Complete" : `${scanProgressPercent.toFixed(1)}%`
+  );
+
+  const scanModeText = $derived(
+    scanResult?.scan_mode ? modeLabel(scanResult.scan_mode) : progress.scan_mode ? modeLabel(progress.scan_mode) : "—"
+  );
+
+  const entriesLabel = $derived(
+    isScanning
+      ? `${(activeFiles + activeDirs).toLocaleString()} entries indexed`
       : scanResult
         ? `${(scanResult.files_scanned + scanResult.dirs_scanned).toLocaleString()} entries mapped`
         : "Ready"
   );
-  const activeFiles = $derived(scanResult?.files_scanned ?? progress.files_scanned);
-  const activeDirs = $derived(scanResult?.dirs_scanned ?? progress.dirs_scanned);
-  const activeBytes = $derived(scanResult?.bytes_scanned ?? progress.bytes_scanned);
-  const scanProgressPercent = $derived.by(() => {
-    if (scanResult) {
-      return 100;
-    }
 
-if (!isScanning) {
-      return 0;
-    }
-
-    // If we have a total items estimate, use it for progress calculation
-    if (totalItemsEstimate && totalItemsEstimate > 0) {
-      const totalScanned = progress.dirs_scanned + progress.files_scanned;
-      const normalized = Math.min(1, totalScanned / totalItemsEstimate);
-      // Apply easing for smoother visual progress
-      const eased = 1 - (1 - normalized) ** 2;
-      return Math.min(94, eased * 94);
-    }
-
-    // Fallback to time-based estimate
-    const elapsedSeconds = liveDurationMs / 1000;
-    const expectedScanSeconds = currentScanMode === "filesystem" ? 55 : 24;
-    const normalized = Math.min(1, elapsedSeconds / expectedScanSeconds);
-    const eased = 1 - (1 - normalized) ** 2.4;
-    return Math.min(94, Math.max(4, eased * 94));
-  });
-  const scanProgressStyle = $derived(`width: ${scanProgressPercent.toFixed(1)}%`);
-  const selectedDriveLabel = $derived(
-    selectedDriveInfo
-      ? `${selectedDriveInfo.label} [${selectedDriveInfo.filesystem}]`
-      : selectedDrive || "No drive selected"
-  );
-  const readyState = $derived(
-    drivesLoading
-      ? "Detecting volumes"
-      : isScanning
-        ? "Live scan"
-        : scanResult
-          ? "Scan complete"
-          : tauriAvailable
-            ? "Ready"
-            : "Preview mode"
+  const showStartScreen = $derived(
+    !isScanning && !scanResult && !scanError
   );
 </script>
 
@@ -422,1167 +372,348 @@ if (!isScanning) {
   <title>Oxide</title>
 </svelte:head>
 
-<main class="app-shell">
-  <nav class="rail" aria-label="Primary views">
-    <img class="rail-brand" src="/logo.png" alt="Oxide" />
-    <button
-      class:active={activeTab === "treemap"}
-      class="rail-btn"
-      title="Treemap"
-      aria-label="Treemap"
-      onclick={() => (activeTab = "treemap")}
-    >
-      <span class="icon-grid" aria-hidden="true"></span>
-    </button>
-    <button
-      class:active={activeTab === "list"}
-      class="rail-btn"
-      title="Largest files"
-      aria-label="Largest files"
-      onclick={() => (activeTab = "list")}
-    >
-      <span class="icon-list" aria-hidden="true"></span>
-    </button>
-    <span class="rail-divider" aria-hidden="true"></span>
-    <button class="rail-btn" title="Copy scan snapshot" aria-label="Copy scan snapshot" onclick={exportSnapshot}>
-      <span class="icon-export" aria-hidden="true"></span>
-    </button>
-  </nav>
-
-  <header class="hud">
-    <div class="hud-left">
-      <div>
-        <h1>Space Observatory</h1>
-        <span>{selectedDriveLabel}</span>
-      </div>
-      <span class="status-pill">
-        <span class:active={isScanning} class="status-dot" aria-hidden="true"></span>
-        {readyState}
-      </span>
+<div class="app">
+  <header class="top-bar">
+    <div class="top-bar-left">
+      <button class="logo-btn" onclick={resetApp} title="Oxide Home" aria-label="Oxide Home">
+        <img src="/logo.png" alt="Oxide" class="logo-img" />
+      </button>
+      {#if !showStartScreen}
+        <div class="top-bar-context">
+          <span class="drive-label">{driveLabel}</span>
+          <span class="scan-status">
+            <span class="status-dot" class:active={isScanning} aria-hidden="true"></span>
+            {scanStatusText}
+          </span>
+        </div>
+      {/if}
     </div>
 
-    <div class="hud-right">
-      <label class="drive-picker">
-        <span class="visually-hidden">Drive</span>
-        <span class="select-shell">
-          <select bind:value={selectedDrive} disabled={drivesLoading || isScanning || !drives.length}>
-            {#each drives as drive}
-              <option value={drive.letter}>
-                {drive.label} [{drive.filesystem}]
-              </option>
-            {/each}
-          </select>
-        </span>
-      </label>
-      <button class="hud-btn ghost" onclick={exportSnapshot}>Export</button>
+    <div class="top-bar-right">
+      {#if !isScanning}
+        <label class="drive-select-label">
+          <span class="sr-only">Select drive</span>
+          <div class="select-wrap">
+            <select
+              bind:value={selectedDrive}
+              disabled={drivesLoading || isScanning}
+              aria-label="Select drive"
+            >
+              {#each drives as drive}
+                <option
+                  value={drive.letter}
+                  disabled={!drive.supported}
+                >
+                  {drive.letter} · {drive.label}
+                </option>
+              {/each}
+              {#if drivesLoading}
+                <option disabled>Detecting…</option>
+              {/if}
+            </select>
+          </div>
+        </label>
+      {/if}
+      {#if isScanning || scanResult}
+        <div class="stats-row" aria-label="Scan statistics">
+          <span class="stat"><strong>{activeFiles.toLocaleString()}</strong> files</span>
+          <span class="stat"><strong>{formatSize(activeBytes)}</strong></span>
+        </div>
+      {/if}
+      <button class="icon-btn" class:active={showDebugPanel} onclick={() => (showDebugPanel = !showDebugPanel)} title="Debug panel" aria-label="Toggle debug panel" aria-pressed={showDebugPanel}>
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+      </button>
+
+      <button class="icon-btn" class:active={showSidebar} onclick={() => (showSidebar = !showSidebar)} title="Toggle sidebar" aria-label="Toggle sidebar" aria-pressed={showSidebar}>
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/></svg>
+      </button>
+
       <button
-        class:scanning={isScanning}
-        class="hud-btn primary scan-action"
-        disabled={!selectedDriveInfo?.supported || drivesLoading || (isScanning ? false : !selectedDriveInfo?.supported)}
+        class="btn-scan"
+        disabled={!selectedDriveInfo?.supported || drivesLoading}
         onclick={() => isScanning ? cancelScan() : scan()}
+        aria-label={isScanning ? "Cancel scan" : "Start scan"}
       >
         {#if isScanning}
-          <svg
-            class="scan-icon active"
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            fill="none"
-          >
-            <path
-              d="M20 12a8 8 0 1 1-2.34-5.66"
-              stroke="currentColor"
-              stroke-width="2.4"
-              stroke-linecap="round"
-            />
-            <path
-              d="M20 4v6h-6"
-              stroke="currentColor"
-              stroke-width="2.4"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
+          <svg class="spin-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+            <path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/>
           </svg>
           Cancel
         {:else}
-          <svg
-            class="scan-icon"
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            fill="none"
-          >
-            <path
-              d="M20 12a8 8 0 1 1-2.34-5.66"
-              stroke="currentColor"
-              stroke-width="2.4"
-              stroke-linecap="round"
-            />
-            <path
-              d="M20 4v6h-6"
-              stroke="currentColor"
-              stroke-width="2.4"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+            <path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/>
           </svg>
           Scan
         {/if}
       </button>
     </div>
   </header>
+  <main class="main-area">
+    <div class="content-area">
+      {#if showStartScreen}
+        <section class="start-screen" aria-label="Welcome">
+          <div class="start-content">
+            <h1>Where did the space go?</h1>
+            <p>Pick a drive, hit <strong>Scan</strong>, and Oxide maps every file and folder so you can find what's hogging your storage.</p>
 
-  <section class="canvas-zone" aria-label="Disk workspace">
-    {#if drivesLoading}
-      <section class="empty-state">Detecting local volumes...</section>
-    {:else if !drives.length}
-      <section class="empty-state">
-        {#if tauriAvailable}
-          No local drives were detected on this system.
-        {:else}
-          Browser preview mode is running without the Tauri bridge.
-        {/if}
-      </section>
-    {:else if selectedDriveInfo && !selectedDriveInfo.supported}
-      <section class="empty-state">
-        <strong>{selectedDriveInfo.letter} is {selectedDriveInfo.filesystem}</strong>
-        <span>Oxide currently scans NTFS volumes.</span>
-      </section>
-{:else if isScanning}
-      <section class="scan-board" aria-label="Scan in progress" transition:fade={{ duration: 200 }}>
-        <div class="scan-core">
-          <span class="status-pill">
-            <span class:active={isScanning} class="status-dot" aria-hidden="true"></span>
-            {progress.phase}
-          </span>
-          <strong>{selectedDriveInfo?.letter ?? selectedDrive} is being mapped</strong>
-          <span>{scanActivityLabel} · {formatSize(activeBytes)} · {visibleDurationLabel}</span>
-          <div class="scan-meter">
-            <span style={scanProgressStyle}></span>
-          </div>
-        </div>
-      </section>
-{:else if scanResult}
-      <div class="workspace" transition:fade={{ duration: 300 }}>
-        <section class="visual-stage" aria-label="Disk visualization">
-          <div class="stage-toolbar">
-            <div class="stage-context">
-              <div class="stage-title-row">
-                {#if canGoBack}
-                  <button class="back-btn" onclick={goBack} title="Go back" aria-label="Go back">
-                    <span class="icon-back" aria-hidden="true"></span>
+            {#if drives.length > 0}
+              <div class="drive-grid" role="listbox" aria-label="Available drives">
+                {#each drives as drive}
+                  <button
+                    class="drive-card"
+                    class:selected={selectedDrive === drive.letter}
+                    class:disabled={!drive.supported}
+                    disabled={!drive.supported}
+                    onclick={() => (selectedDrive = drive.letter)}
+                    role="option"
+                    aria-selected={selectedDrive === drive.letter}
+                  >
+                    <div class="drive-card-icon">
+                      <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="2" y="6" width="20" height="12" rx="2"/>
+                        <line x1="6" y1="12" x2="10" y2="12"/>
+                        <circle cx="17" cy="12" r="1.5" fill="currentColor"/>
+                      </svg>
+                    </div>
+                    <div class="drive-card-info">
+                      <span class="drive-letter">{drive.letter}</span>
+                      <span class="drive-name">{drive.label}</span>
+                    </div>
+                    <div class="drive-card-meta">
+                      <span class="drive-fstype">{drive.filesystem}{#if !drive.supported}&middot; unsupported{/if}</span>
+                      {#if drive.supported && drive.total_bytes > 0}
+                        <span class="drive-free">{formatSize(drive.free_bytes)} free</span>
+                      {/if}
+                    </div>
                   </button>
-                {/if}
-                <span>{activeTab === "treemap" ? `Space map - ${scanResult.drive_letter}` : "Largest files"}</span>
-              </div>
-              <div class="breadcrumb">
-                {#each breadcrumbPath as [id, name], index (id)}
-                  {#if index > 0}
-                    <span class="sep">/</span>
-                  {/if}
-                  <button class="bc-item" onclick={() => (rootId = id)}>{name}</button>
                 {/each}
               </div>
+              <button class="btn-scan btn-scan-lg" disabled={!selectedDriveInfo?.supported || drivesLoading} onclick={() => scan()}>
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+                  <path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/>
+                </svg>
+                Scan {selectedDrive}
+              </button>
+            {:else if !drivesLoading && !tauriAvailable}
+              <div class="preview-notice">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                <p>Running in browser preview. Launch the Oxide desktop app to scan your drives.</p>
+              </div>
+            {:else if drivesLoading}
+              <p class="loading-text">Detecting drives…</p>
+            {:else}
+              <p class="no-drives">No drives found on this system.</p>
+            {/if}
+          </div>
+        </section>
+
+      {/if}
+      {#if isScanning}
+        <section class="scan-screen" aria-label="Scan in progress" aria-live="polite">
+          <div class="scan-card">
+            <div class="scan-header">
+              <span class="status-dot active" aria-hidden="true"></span>
+              Scanning {selectedDrive}
             </div>
 
-            <nav class="view-tabs" aria-label="View mode">
-              <button class:active={activeTab === "treemap"} onclick={() => (activeTab = "treemap")}>
-                Treemap
-              </button>
-              <button class:active={activeTab === "list"} onclick={() => (activeTab = "list")}>
-                Files
-              </button>
-            </nav>
-          </div>
+            <div class="scan-big-text">{entriesLabel}</div>
 
-          <div class="visual-content">
+            <div class="scan-details">
+              <span>{progress.phase}</span>
+              <span>{formatSize(activeBytes)} scanned</span>
+              <span>{durationLabel}</span>
+            </div>
+
+            <div class="progress-bar">
+              <div class="progress-fill" style="width: {scanProgressPercent}%"></div>
+            </div>
+
+            <span class="progress-label">{scanPercentLabel}</span>
+
+            <button class="btn-scan" onclick={cancelScan}>
+              Cancel
+            </button>
+          </div>
+        </section>
+      {/if}
+      {#if scanError && !isScanning}
+        <section class="error-screen" aria-label="Scan error" aria-live="assertive">
+          <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="#ffb199" stroke-width="1.5" stroke-linecap="round">
+            <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
+          </svg>
+          <h2>Scan failed</h2>
+          <p>{scanError}</p>
+          <button class="btn-scan" onclick={() => { scanError = null; resetScanState(); }}>
+            Dismiss
+          </button>
+        </section>
+      {/if}
+      {#if scanResult && !isScanning}
+        <section class="results-screen" aria-label="Scan results">
+          <div class="results-toolbar">
+            <div class="toolbar-left">
+              {#if canGoBack}
+                <button class="back-btn" onclick={goBack} title="Go back" aria-label="Go back">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+                </button>
+              {/if}
+
+              <nav class="breadcrumb" aria-label="Current path">
+                {#each breadcrumbPath as [id, name], i (id)}
+                  {#if i > 0}<span class="bc-sep" aria-hidden="true">/</span>{/if}
+                  <button class="bc-item" onclick={() => goToBreadcrumb(i)}>{name}</button>
+                {/each}
+              </nav>
+            </div>
+
+            <div class="toolbar-right">
+              <div class="tabs" role="tablist" aria-label="View mode">
+                <button
+                  class="tab"
+                  class:active={activeTab === "treemap"}
+                  role="tab"
+                  aria-selected={activeTab === "treemap"}
+                  onclick={() => (activeTab = "treemap")}
+                >
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+                  Treemap
+                </button>
+                <button
+                  class="tab"
+                  class:active={activeTab === "files"}
+                  role="tab"
+                  aria-selected={activeTab === "files"}
+                  onclick={() => (activeTab = "files")}
+                >
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><rect x="3" y="4" width="18" height="2" rx="1"/><rect x="3" y="11" width="18" height="2" rx="1"/><rect x="3" y="18" width="18" height="2" rx="1"/></svg>
+                  Files
+                </button>
+              </div>
+
+              <button class="icon-btn" onclick={exportSnapshot} title="Copy scan snapshot" aria-label="Copy scan snapshot">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="results-content">
             {#if activeTab === "treemap"}
               <Treemap {rootId} onNavigate={handleNavigate} />
             {:else}
-              <FileList scanLoaded={true} {rootId} onNavigate={handleNavigate} onOpenInExplorer={openInExplorer} compact={false} />
+              <FileList
+                scanLoaded={true}
+                {rootId}
+                onNavigate={handleNavigate}
+                onOpenInExplorer={openInExplorer}
+              />
             {/if}
           </div>
-
-          <div class="hint">Click a block to drill in · Use breadcrumbs to climb back</div>
-        </section>
-
-        <aside class="analysis-rail" aria-label="Disk analysis tools">
-          <section class="navigator" aria-label="Folder navigator">
-            <TreeView
-              scanLoaded={true}
-              scanRootId={scanResult.root_id}
-              selectedId={rootId}
-              onSelect={handleNavigate}
-            />
-          </section>
-
-          <section class="inspector" aria-label="Largest files">
-            <FileList scanLoaded={true} {rootId} onNavigate={handleNavigate} onOpenInExplorer={openInExplorer} compact />
-          </section>
-        </aside>
-      </div>
-    {:else}
-      <section class="start-board">
-        <div class="start-copy">
-          <img class="start-logo" src="/logo.png" alt="" aria-hidden="true" />
-          <div>
-            <strong>Choose a drive to inspect</strong>
-            <span>Map storage pressure first, then drill into folders and heavy files.</span>
+          <div class="context-hint">
+            Click any block to drill in · Right‑click to open in Explorer · Hover for details
           </div>
-        </div>
-
-        <div class="drive-board" aria-label="Available drives">
-          {#each drives as drive}
-            <button
-              class:selected={selectedDrive === drive.letter}
-              class:unsupported={!drive.supported}
-              disabled={!drive.supported || isScanning}
-              onclick={() => {
-                selectedDrive = drive.letter;
-              }}
-            >
-              <span class="drive-info">
-                <strong>{drive.letter}</strong>
-                <small>{drive.label}</small>
-              </span>
-              <span class="drive-meta">
-                <em>{drive.supported ? drive.filesystem : `${drive.filesystem} unsupported`}</em>
-                {#if drive.supported && drive.total_bytes > 0}
-                  <span class="drive-space">{formatSize(drive.free_bytes)} free of {formatSize(drive.total_bytes)}</span>
-                {/if}
-              </span>
-            </button>
-          {/each}
-        </div>
-      </section>
+        </section>
+      {/if}
+    </div>
+    {#if showSidebar && scanResult && !isScanning}
+      <aside class="sidebar" aria-label="Folder sidebar">
+        <TreeView
+          scanLoaded={true}
+          scanRootId={scanResult.root_id}
+          selectedId={rootId}
+          onSelect={handleNavigate}
+        />
+      </aside>
     {/if}
-  </section>
+  </main>
+  <footer class="bottom-bar">
+    <span class="bottom-stat">
+      <span class="label">Files</span>
+      <span class="value">{activeFiles.toLocaleString()}</span>
+    </span>
+    <span class="separator" aria-hidden="true"></span>
+    <span class="bottom-stat">
+      <span class="label">Folders</span>
+      <span class="value">{activeDirs.toLocaleString()}</span>
+    </span>
+    <span class="separator" aria-hidden="true"></span>
+    <span class="bottom-stat">
+      <span class="label">Indexed</span>
+      <span class="value">{formatSize(activeBytes)}</span>
+    </span>
+    <span class="separator" aria-hidden="true"></span>
+    <span class="bottom-stat">
+      <span class="label">Mode</span>
+      <span class="value">{scanModeText}</span>
+    </span>
+    <span class="separator" aria-hidden="true"></span>
+    <span class="bottom-stat">
+      <span class="label">Time</span>
+      <span class="value">{durationLabel}</span>
+    </span>
 
-  <section class="drawer" aria-label="Scan summary">
-    <div class="drawer-stat">
-      <span>Files</span>
-      <strong>{activeFiles.toLocaleString()}</strong>
-    </div>
-    <i></i>
-    <div class="drawer-stat">
-      <span>Folders</span>
-      <strong>{activeDirs.toLocaleString()}</strong>
-    </div>
-    <i></i>
-    <div class="drawer-stat">
-      <span>Indexed</span>
-      <strong>{formatSize(activeBytes)}</strong>
-    </div>
-    <i></i>
-    <div class="drawer-stat">
-      <span>Scan time</span>
-      <strong>{visibleDurationLabel}</strong>
-    </div>
-    <div class="drawer-progress">
-      <div>
-        <span>{progress.phase}</span>
-        <span>{scanActivityLabel}</span>
-      </div>
-      <div class:active={isScanning} class="activity-line">
-        <span style={scanProgressStyle}></span>
-      </div>
-    </div>
-  </section>
-
-  <footer class="telemetry">
-    <div>
-      <span>MFT</span><strong>{scanResult ? formatDuration(scanResult.timings.scan_ms) : "--"}</strong>
-      <span>Aggregate</span><strong>{scanResult ? formatDuration(scanResult.timings.aggregate_ms) : "--"}</strong>
-      <span>Index</span><strong>{scanResult ? formatDuration(scanResult.timings.largest_files_ms) : "--"}</strong>
-    </div>
-    <div>
-      <span>Mode</span><strong>{fallbackSummary || scanModeSummary}</strong>
-      <span>Status</span><strong>{status}</strong>
-    </div>
+    {#if showDebugPanel && scanResult}
+      <details class="debug-panel" open aria-label="Debug information">
+        <summary>Debug</summary>
+        <div class="debug-content">
+          <span>MFT scan: <strong>{formatDuration(scanResult.timings.scan_ms)}</strong></span>
+          <span>Aggregate: <strong>{formatDuration(scanResult.timings.aggregate_ms)}</strong></span>
+          <span>Index: <strong>{formatDuration(scanResult.timings.largest_files_ms)}</strong></span>
+          <span>Store: <strong>{formatDuration(scanResult.timings.store_ms)}</strong></span>
+          <span>Total: <strong>{formatDuration(scanResult.timings.total_ms)}</strong></span>
+          <span>Mode: <strong>{scanModeText}</strong></span>
+        </div>
+      </details>
+    {/if}
   </footer>
-</main>
+</div>
 
 <style>
+  /* ── Reset & base ──────────────────────────────────────── */
   :global(body) {
     margin: 0;
-    min-height: 100vh;
+    height: 100vh;
     overflow: hidden;
     background:
-      linear-gradient(90deg, rgba(223, 245, 154, 0.024) 1px, transparent 1px),
-      linear-gradient(180deg, rgba(223, 245, 154, 0.018) 1px, transparent 1px),
-      radial-gradient(circle at 16% 12%, rgba(223, 245, 154, 0.08), transparent 22rem),
-      linear-gradient(135deg, #0e1210 0%, #080b09 58%, #15110f 100%);
-    background-size: 48px 48px, 48px 48px, auto, auto;
-    color: #f1ece2;
-    font-family: "Aptos", "Segoe UI Variable", "Segoe UI", sans-serif;
+      linear-gradient(90deg, rgba(223, 245, 154, 0.02) 1px, transparent 1px),
+      linear-gradient(180deg, rgba(223, 245, 154, 0.015) 1px, transparent 1px),
+      radial-gradient(ellipse at 20% 10%, rgba(223, 245, 154, 0.06), transparent 24rem),
+      radial-gradient(ellipse at 80% 90%, rgba(242, 177, 111, 0.04), transparent 20rem),
+      linear-gradient(160deg, #0c100d 0%, #0a0e0b 50%, #120f0d 100%);
+    background-size: 48px 48px, 48px 48px, auto, auto, auto;
+    color: #ebe4d6;
+    font: 14px/1.5 "Aptos", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   }
 
   :global(button),
+  :global(input),
   :global(select) {
     font: inherit;
   }
 
   :global(button:focus-visible),
-  :global(select:focus-visible) {
+  :global(select:focus-visible),
+  :global(input:focus-visible) {
     outline: 2px solid #dff59a;
     outline-offset: 2px;
+    border-radius: 4px;
   }
 
   :global(::-webkit-scrollbar) {
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
   }
-
   :global(::-webkit-scrollbar-track) {
     background: transparent;
   }
-
   :global(::-webkit-scrollbar-thumb) {
-    background: #343b2e;
-    border: 2px solid #10130f;
+    background: #2d3329;
     border-radius: 999px;
   }
-
-  /* Firefox scrollbar support */
   :global(*) {
     scrollbar-width: thin;
-    scrollbar-color: #343b2e transparent;
+    scrollbar-color: #2d3329 transparent;
   }
 
-  .app-shell {
-    --bg-void: #0a0d0b;
-    --bg-base: #0e1210;
-    --bg-panel: rgba(21, 23, 18, 0.94);
-    --bg-glass: rgba(14, 18, 16, 0.78);
-    --surface-1: oklch(18% 0.015 125);
-    --surface-2: oklch(22% 0.017 125);
-    --surface-3: oklch(26% 0.019 115);
-    --accent: #dff59a;
-    --accent-2: #f2b16f;
-    --warn: #ffb199;
-    --text: #fbf6eb;
-    --muted: #9a948a;
-    --dim: #6b665e;
-    --line: rgba(223, 245, 154, 0.08);
-    --line-soft: rgba(223, 245, 154, 0.045);
-    --ease: cubic-bezier(0.16, 1, 0.3, 1);
-    display: grid;
-    grid-template-rows: 52px minmax(0, 1fr) auto 32px;
-    grid-template-columns: 48px minmax(0, 1fr);
-    grid-template-areas:
-      "rail hud"
-      "rail canvas"
-      "rail drawer"
-      "rail telemetry";
-    width: 100vw;
-    height: 100vh;
-    overflow: hidden;
-    background: var(--bg-void);
-    color: #e8e2d6;
-  }
-
-  .rail {
-    grid-area: rail;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    padding: 14px 0;
-    border-right: 1px solid var(--line-soft);
-    background: var(--bg-base);
-    box-sizing: border-box;
-  }
-
-  .rail-brand {
-    width: 32px;
-    height: 32px;
-    margin-bottom: 22px;
-    border: 1px solid rgba(223, 245, 154, 0.22);
-    border-radius: 8px;
-    background: #090d0a;
-    object-fit: cover;
-    object-position: left center;
-    box-shadow: 0 0 24px rgba(223, 245, 154, 0.18);
-  }
-
-  .rail-btn {
-    position: relative;
-    display: grid;
-    place-items: center;
-    width: 36px;
-    height: 36px;
-    border: 0;
-    border-radius: 10px;
-    background: transparent;
-    color: var(--muted);
-    cursor: pointer;
-    transition: background 180ms var(--ease), color 180ms var(--ease), transform 180ms var(--ease);
-  }
-
-  .rail-btn:hover {
-    background: var(--surface-1);
-    color: #e8e2d6;
-    transform: translateY(-1px);
-  }
-
-  .rail-btn.active {
-    background: var(--surface-2);
-    color: var(--accent);
-    box-shadow: inset 0 0 0 1px var(--line);
-  }
-
-  .rail-btn.active::before {
-    content: "";
-    position: absolute;
-    left: -6px;
-    width: 3px;
-    height: 16px;
-    border-radius: 0 2px 2px 0;
-    background: var(--accent);
-  }
-
-  .rail-divider {
-    width: 20px;
-    height: 1px;
-    margin: 8px 0;
-    background: var(--line-soft);
-  }
-
-  .icon-grid,
-  .icon-list,
-  .icon-export {
-    width: 17px;
-    height: 17px;
-    display: block;
-  }
-
-  .icon-grid {
-    background:
-      linear-gradient(currentColor 0 0) 0 0 / 7px 7px,
-      linear-gradient(currentColor 0 0) 10px 0 / 7px 7px,
-      linear-gradient(currentColor 0 0) 0 10px / 7px 7px,
-      linear-gradient(currentColor 0 0) 10px 10px / 7px 7px;
-    background-repeat: no-repeat;
-  }
-
-  .icon-list {
-    background:
-      linear-gradient(currentColor 0 0) 0 2px / 17px 2px,
-      linear-gradient(currentColor 0 0) 0 8px / 17px 2px,
-      linear-gradient(currentColor 0 0) 0 14px / 17px 2px;
-    background-repeat: no-repeat;
-  }
-
-  .icon-export {
-    border: 2px solid currentColor;
-    border-top: 0;
-    box-sizing: border-box;
-  }
-
-  .icon-export::before {
-    content: "";
-    display: block;
-    width: 7px;
-    height: 7px;
-    margin: -1px auto 0;
-    border-top: 2px solid currentColor;
-    border-right: 2px solid currentColor;
-    transform: rotate(-45deg);
-  }
-
-  .hud {
-    grid-area: hud;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 18px;
-    padding: 0 20px;
-    border-bottom: 1px solid var(--line-soft);
-    background: var(--bg-glass);
-    backdrop-filter: blur(20px) saturate(1.2);
-    box-sizing: border-box;
-  }
-
-  .hud-left,
-  .hud-right {
-    display: flex;
-    align-items: center;
-    min-width: 0;
-  }
-
-  .hud-left {
-    gap: 18px;
-  }
-
-  .hud-right {
-    justify-content: flex-end;
-    gap: 10px;
-  }
-
-  .hud h1 {
-    margin: 0;
-    color: var(--text);
-    font-size: 0.84rem;
-    font-weight: 760;
-    line-height: 1.1;
-  }
-
-  .hud-left div {
-    display: grid;
-    gap: 2px;
-    min-width: 0;
-  }
-
-  .hud-left div > span {
-    overflow: hidden;
-    color: var(--muted);
-    font-size: 0.68rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .status-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    min-height: 24px;
-    border: 1px solid rgba(223, 245, 154, 0.12);
-    border-radius: 6px;
-    background: rgba(223, 245, 154, 0.08);
-    color: var(--accent);
-    font-size: 0.68rem;
-    font-weight: 700;
-    padding: 0 10px;
-    white-space: nowrap;
-  }
-
-  .status-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 999px;
-    background: var(--accent);
-    box-shadow: 0 0 8px rgba(223, 245, 154, 0.55);
-  }
-
-  .status-dot.active {
-    animation: breathe 1.7s var(--ease) infinite;
-  }
-
-  .drive-picker {
-    display: block;
-    width: min(30vw, 24rem);
-    min-width: 13rem;
-  }
-
-  .select-shell {
-    position: relative;
-    display: block;
-  }
-
-  .select-shell::after {
-    content: "";
-    position: absolute;
-    right: 12px;
-    top: 50%;
-    width: 7px;
-    height: 7px;
-    border-right: 2px solid var(--muted);
-    border-bottom: 2px solid var(--muted);
-    pointer-events: none;
-    transform: translateY(-65%) rotate(45deg);
-  }
-
-  .hud select {
-    width: 100%;
-    appearance: none;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--surface-1);
-    color: #e8e2d6;
-    cursor: pointer;
-    font-size: 0.75rem;
-    font-weight: 650;
-    padding: 0.45rem 2rem 0.45rem 0.75rem;
-  }
-
-  .hud-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 7px;
-    min-height: 32px;
-    border-radius: 8px;
-    cursor: pointer;
-    font-size: 0.75rem;
-    font-weight: 760;
-    padding: 0 0.9rem;
-    transition: background 180ms var(--ease), box-shadow 180ms var(--ease), transform 180ms var(--ease), color 180ms var(--ease);
-  }
-
-  .hud-btn.ghost {
-    border: 1px solid var(--line);
-    background: transparent;
-    color: var(--muted);
-  }
-
-  .hud-btn.ghost:hover {
-    background: var(--surface-1);
-    color: #e8e2d6;
-  }
-
-  .hud-btn.primary {
-    border: 0;
-    background: var(--accent);
-    color: #171b0b;
-  }
-
-  .hud-btn.primary:hover:not(:disabled) {
-    box-shadow: 0 0 20px rgba(223, 245, 154, 0.28);
-    transform: translateY(-1px);
-  }
-
-  .hud select:disabled {
-    cursor: not-allowed;
-    opacity: 0.55;
-  }
-
-  .hud-btn:disabled {
-    cursor: not-allowed;
-  }
-
-  .hud-btn.primary:disabled:not(.scanning) {
-    opacity: 0.55;
-  }
-
-  .scan-action.scanning {
-    opacity: 1;
-    box-shadow: 0 0 20px rgba(223, 245, 154, 0.22);
-  }
-
-  .canvas-zone {
-    grid-area: canvas;
-    position: relative;
-    min-width: 0;
-    min-height: 0;
-    overflow: hidden;
-    background:
-      linear-gradient(rgba(223, 245, 154, 0.03) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(223, 245, 154, 0.025) 1px, transparent 1px),
-      var(--bg-void);
-    background-size: 40px 40px;
-  }
-
-  .workspace {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(20rem, 23rem);
-    width: 100%;
-    height: 100%;
-    min-height: 0;
-  }
-
-  .visual-stage {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    min-height: 0;
-    overflow: hidden;
-  }
-
-  .stage-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    min-height: 54px;
-    padding: 12px 18px 8px;
-    box-sizing: border-box;
-  }
-
-  .stage-context {
-    display: grid;
-    gap: 4px;
-    min-width: 0;
-  }
-
-  .stage-context > span {
-    color: var(--muted);
-    font-size: 0.64rem;
-    font-weight: 850;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-  }
-
-  .stage-title-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .back-btn {
-    display: grid;
-    place-items: center;
-    width: 24px;
-    height: 24px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: var(--surface-1);
-    color: var(--muted);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: background 140ms var(--ease), color 140ms var(--ease);
-  }
-
-  .back-btn:hover {
-    background: var(--surface-2);
-    color: var(--accent);
-  }
-
-  .icon-back {
-    width: 12px;
-    height: 12px;
-    display: block;
-    border: 2px solid currentColor;
-    border-top: 0;
-    border-right: 0;
-    box-sizing: border-box;
-    transform: rotate(45deg);
-    margin-left: 2px;
-  }
-
-  .breadcrumb {
-    display: flex;
-    align-items: center;
-    gap: 3px;
-    min-width: 0;
-  }
-
-  .bc-item {
-    max-width: 12rem;
-    overflow: hidden;
-    border: 0;
-    border-radius: 6px;
-    background: transparent;
-    color: #e8e2d6;
-    cursor: pointer;
-    padding: 0.12rem 0.35rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    transition: color 160ms var(--ease), background 160ms var(--ease);
-  }
-
-  .bc-item:hover {
-    background: rgba(223, 245, 154, 0.08);
-    color: var(--accent);
-  }
-
-  .sep {
-    color: var(--dim);
-  }
-
-  .view-tabs {
-    display: flex;
-    gap: 4px;
-    flex-shrink: 0;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--surface-1);
-    padding: 4px;
-  }
-
-  .view-tabs button {
-    min-width: 4.2rem;
-    min-height: 28px;
-    border: 0;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--muted);
-    cursor: pointer;
-    font-size: 0.74rem;
-  }
-
-  .view-tabs button:hover,
-  .view-tabs button.active {
-    color: var(--text);
-  }
-
-  .view-tabs button.active {
-    background: var(--surface-3);
-    font-weight: 800;
-  }
-
-  .visual-content {
-    flex: 1;
-    min-height: 0;
-    padding: 0 18px 18px;
-    box-sizing: border-box;
-  }
-
-  .visual-content > :global(*) {
-    min-height: 0;
-  }
-
-  .analysis-rail {
-    display: grid;
-    grid-template-rows: minmax(13rem, 0.95fr) minmax(14rem, 1fr);
-    min-width: 0;
-    min-height: 0;
-    overflow: hidden;
-    border-left: 1px solid var(--line);
-    background: var(--bg-panel);
-    backdrop-filter: blur(16px);
-  }
-
-  .navigator,
-  .inspector {
-    min-height: 0;
-    overflow: hidden;
-  }
-
-  .inspector {
-    border-top: 1px solid var(--line-soft);
-    padding: 14px 16px;
-    box-sizing: border-box;
-  }
-
-  .hint {
-    position: absolute;
-    left: 18px;
-    bottom: 18px;
-    z-index: 2;
-    border: 1px solid var(--line-soft);
-    border-radius: 8px;
-    background: rgba(14, 18, 16, 0.72);
-    color: var(--muted);
-    font-size: 0.72rem;
-    padding: 0.45rem 0.7rem;
-    pointer-events: none;
-  }
-
-  .empty-state,
-  .scan-board,
-  .start-board {
-    width: 100%;
-    height: 100%;
-    min-height: 0;
-  }
-
-  .empty-state {
-    display: grid;
-    place-content: center;
-    gap: 0.45rem;
-    color: var(--muted);
-    padding: 2rem;
-    text-align: center;
-    box-sizing: border-box;
-  }
-
-  .empty-state strong {
-    color: var(--text);
-  }
-
-  .scan-board {
-    display: grid;
-    place-items: center;
-    padding: clamp(1.5rem, 4vw, 4rem);
-    box-sizing: border-box;
-  }
-
-  .scan-core {
-    display: grid;
-    gap: 12px;
-    width: min(38rem, 100%);
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    background:
-      linear-gradient(135deg, rgba(223, 245, 154, 0.085), transparent 52%),
-      rgba(14, 18, 16, 0.72);
-    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
-    padding: clamp(1.25rem, 3vw, 2rem);
-    backdrop-filter: blur(14px);
-  }
-
-  .scan-core .status-pill {
-    justify-self: start;
-  }
-
-  .scan-core strong {
-    color: var(--text);
-    font-size: clamp(1.35rem, 2.6vw, 2.4rem);
-    font-weight: 820;
-    line-height: 1.05;
-  }
-
-  .scan-core > span:not(.status-pill) {
-    color: var(--muted);
-  }
-
-  .scan-meter {
-    height: 8px;
-    overflow: hidden;
-    border-radius: 999px;
-    background: rgba(223, 245, 154, 0.08);
-  }
-
-  .scan-meter span {
-    display: block;
-    height: 100%;
-    border-radius: inherit;
-    background:
-      linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.28), rgba(255, 255, 255, 0)) 0 0 / 72px 100%,
-      linear-gradient(90deg, var(--accent), var(--accent-2));
-    transition: width 520ms var(--ease);
-    animation: meter-sheen 1.6s linear infinite;
-  }
-
-  .start-board {
-    display: grid;
-    grid-template-columns: minmax(19rem, 0.82fr) minmax(21rem, 1fr);
-    overflow: hidden;
-  }
-
-  .start-copy {
-    display: grid;
-    align-content: center;
-    gap: 24px;
-    border-right: 1px solid var(--line);
-    background: rgba(21, 23, 18, 0.62);
-    padding: clamp(1.5rem, 4vw, 4rem);
-  }
-
-  .start-logo {
-    width: min(360px, 82%);
-    max-height: 180px;
-    object-fit: contain;
-    object-position: left center;
-    filter: drop-shadow(0 0 32px rgba(223, 245, 154, 0.16));
-  }
-
-  .start-copy div {
-    display: grid;
-    gap: 0.65rem;
-    max-width: 31rem;
-  }
-
-  .start-copy strong {
-    color: var(--text);
-    font-size: clamp(1.65rem, 3vw, 3rem);
-    font-weight: 820;
-    line-height: 1.02;
-  }
-
-  .start-copy span {
-    color: var(--muted);
-    line-height: 1.55;
-  }
-
-  .drive-board {
-    display: grid;
-    align-content: start;
-    gap: 10px;
-    overflow: auto;
-    padding: clamp(1rem, 2.4vw, 1.5rem);
-  }
-
-  .drive-board button {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    min-height: 68px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: var(--surface-1);
-    color: #ebe4d8;
-    cursor: pointer;
-    padding: 0.85rem 1rem;
-    text-align: left;
-    transition: border-color 180ms var(--ease), background 180ms var(--ease), transform 180ms var(--ease);
-  }
-
-  .drive-board button:hover:not(:disabled),
-  .drive-board button.selected {
-    border-color: rgba(223, 245, 154, 0.34);
-    background: var(--surface-2);
-    transform: translateY(-1px);
-  }
-
-  .drive-board button:disabled {
-    cursor: not-allowed;
-    opacity: 0.55;
-  }
-
-  .drive-board button span {
-    display: grid;
-    gap: 0.15rem;
-    min-width: 0;
-  }
-
-  .drive-board button strong {
-    color: var(--text);
-    font-size: 1.05rem;
-  }
-
-  .drive-board small,
-  .drive-board em {
-    overflow: hidden;
-    color: var(--muted);
-    font-size: 0.78rem;
-    font-style: normal;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .drive-meta {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    align-items: flex-end;
-  }
-
-  .drive-space {
-    font-size: 0.7rem;
-    color: var(--dim);
-  }
-
-  .drive-board em {
-    flex-shrink: 0;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    padding: 0.22rem 0.55rem;
-  }
-
-  .drive-board button.selected em {
-    border-color: rgba(223, 245, 154, 0.35);
-    color: var(--accent);
-  }
-
-  .drawer {
-    grid-area: drawer;
-    display: grid;
-    grid-template-columns: auto 1px auto 1px auto 1px auto minmax(12rem, 1fr);
-    align-items: center;
-    gap: 18px;
-    min-height: 58px;
-    border-top: 1px solid var(--line);
-    background: var(--bg-panel);
-    padding: 10px 20px;
-    box-sizing: border-box;
-  }
-
-  .drawer i {
-    width: 1px;
-    height: 24px;
-    background: var(--line-soft);
-  }
-
-  .drawer-stat {
-    display: grid;
-    gap: 2px;
-    min-width: 4.25rem;
-  }
-
-  .drawer-stat span,
-  .drawer-progress span,
-  .telemetry span {
-    color: var(--dim);
-    font-size: 0.64rem;
-    font-weight: 750;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
-  }
-
-  .drawer-stat strong {
-    color: var(--text);
-    font-size: 0.84rem;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .drawer-progress {
-    display: grid;
-    gap: 7px;
-    min-width: 0;
-  }
-
-  .drawer-progress > div:first-child {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    min-width: 0;
-  }
-
-  .drawer-progress > div:first-child span:last-child {
-    overflow: hidden;
-    color: var(--muted);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .activity-line {
-    height: 4px;
-    overflow: hidden;
-    border-radius: 999px;
-    background: var(--surface-1);
-  }
-
-  .activity-line span {
-    display: block;
-    height: 100%;
-    border-radius: inherit;
-    background:
-      linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.32), rgba(255, 255, 255, 0)) 0 0 / 64px 100%,
-      linear-gradient(90deg, var(--accent), var(--accent-2));
-    transition: width 520ms var(--ease);
-  }
-
-  .activity-line.active span {
-    animation: meter-sheen 1.35s linear infinite;
-  }
-
-  .telemetry {
-    grid-area: telemetry;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 18px;
-    min-width: 0;
-    border-top: 1px solid var(--line-soft);
-    background: var(--bg-base);
-    padding: 0 20px;
-    box-sizing: border-box;
-  }
-
-  .telemetry div {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .telemetry strong {
-    overflow: hidden;
-    color: #d6cfc1;
-    font-size: 0.65rem;
-    font-variant-numeric: tabular-nums;
-    font-weight: 650;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .telemetry div:last-child {
-    justify-content: flex-end;
-  }
-
-  .scan-icon {
-    width: 15px;
-    height: 15px;
-    flex: 0 0 auto;
-    transform-origin: 50% 50%;
-  }
-
-  .scan-icon.active {
-    animation: spin 850ms linear infinite;
-  }
-
-  .visually-hidden {
+  .sr-only {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -1591,147 +722,741 @@ if (!isScanning) {
     white-space: nowrap;
   }
 
-  @keyframes breathe {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.42;
-    }
+  /* ── App shell ─────────────────────────────────────────── */
+  .app {
+    display: grid;
+    grid-template-rows: 50px 1fr 34px;
+    height: 100vh;
+    overflow: hidden;
   }
 
-  @keyframes meter-sheen {
-    to {
-      background-position: 140px 0, 0 0;
-    }
+  /* ── Top bar ───────────────────────────────────────────── */
+  .top-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 14px;
+    background: rgba(12, 14, 12, 0.92);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid rgba(223, 245, 154, 0.06);
+    z-index: 10;
   }
 
-  @media (max-width: 1120px) {
-    .workspace {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: minmax(28rem, 1fr) minmax(17rem, 0.5fr);
-    }
-
-    .analysis-rail {
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      grid-template-rows: 1fr;
-      border-top: 1px solid var(--line);
-      border-left: 0;
-    }
-
-    .inspector {
-      border-top: 0;
-      border-left: 1px solid var(--line-soft);
-    }
+  .top-bar-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
   }
 
-  @media (max-width: 820px) {
+  .logo-btn {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    padding: 0;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 140ms ease;
+  }
+  .logo-btn:hover {
+    background: rgba(223, 245, 154, 0.08);
+  }
+  .logo-img {
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgba(223, 245, 154, 0.15);
+    border-radius: 6px;
+    background: #080b09;
+    object-fit: cover;
+  }
+
+  .top-bar-context {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+  }
+  .drive-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #d1c9ba;
+  }
+  .scan-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #9a948a;
+  }
+
+  .top-bar-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .drive-select-label {
+    display: block;
+  }
+  .select-wrap {
+    position: relative;
+  }
+  .select-wrap::after {
+    content: "";
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    width: 6px;
+    height: 6px;
+    border-right: 1.5px solid #6b665e;
+    border-bottom: 1.5px solid #6b665e;
+    transform: translateY(-65%) rotate(45deg);
+    pointer-events: none;
+  }
+  .select-wrap select {
+    appearance: none;
+    -webkit-appearance: none;
+    border: 1px solid rgba(223, 245, 154, 0.08);
+    border-radius: 6px;
+    background: rgba(26, 30, 26, 0.6);
+    color: #d1c9ba;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 26px 5px 10px;
+    cursor: pointer;
+    transition: border-color 140ms ease;
+  }
+  .select-wrap select:hover:not(:disabled) {
+    border-color: rgba(223, 245, 154, 0.2);
+  }
+  .select-wrap select:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  .stats-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: #9a948a;
+  }
+  .stats-row .stat strong {
+    color: #ebe4d6;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .icon-btn {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #9a948a;
+    cursor: pointer;
+    padding: 0;
+    transition: background 140ms ease, color 140ms ease;
+  }
+  .icon-btn:hover {
+    background: rgba(223, 245, 154, 0.08);
+    color: #ebe4d6;
+  }
+  .icon-btn[aria-pressed="true"] {
+    color: #dff59a;
+    background: rgba(223, 245, 154, 0.1);
+  }
+
+  .btn-scan {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    border: 0;
+    border-radius: 7px;
+    background: #dff59a;
+    color: #151b0a;
+    font-size: 13px;
+    font-weight: 700;
+    padding: 0 14px;
+    cursor: pointer;
+    transition: transform 140ms ease, box-shadow 200ms ease, opacity 140ms ease;
+  }
+  .btn-scan:hover:not(:disabled) {
+    box-shadow: 0 0 20px rgba(223, 245, 154, 0.25);
+    transform: translateY(-1px);
+  }
+  .btn-scan:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+  .btn-scan:active:not(:disabled) {
+    transform: translateY(0);
+  }
+  .spin-icon {
+    animation: spin 900ms linear infinite;
+  }
+
+  .btn-scan-lg {
+    height: 44px;
+    padding: 0 28px;
+    font-size: 15px;
+    border-radius: 10px;
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: #6b665e;
+    flex-shrink: 0;
+  }
+  .status-dot.active {
+    background: #dff59a;
+    box-shadow: 0 0 6px rgba(223, 245, 154, 0.6);
+    animation: pulse 1.8s ease infinite;
+  }
+
+  /* ── Main area ─────────────────────────────────────────── */
+  .main-area {
+    display: flex;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .content-area {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* ── Start screen ──────────────────────────────────────── */
+  .start-screen {
+    display: grid;
+    place-items: center;
+    height: 100%;
+    padding: 2rem;
+    box-sizing: border-box;
+  }
+  .start-content {
+    display: grid;
+    gap: 2rem;
+    max-width: 52rem;
+    width: 100%;
+    text-align: center;
+  }
+  .start-content h1 {
+    margin: 0;
+    font-size: clamp(1.6rem, 3.2vw, 2.6rem);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    background: linear-gradient(135deg, #dff59a 0%, #f2b16f 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .start-content > p {
+    margin: 0 auto;
+    max-width: 34rem;
+    color: #9a948a;
+    font-size: clamp(0.9rem, 1.4vw, 1.05rem);
+    line-height: 1.6;
+  }
+  .start-content > p strong {
+    color: #dff59a;
+    font-weight: 700;
+  }
+
+  .drive-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+    gap: 10px;
+    max-width: 40rem;
+    margin: 0 auto;
+  }
+
+  .drive-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border: 1px solid rgba(223, 245, 154, 0.08);
+    border-radius: 10px;
+    background: rgba(18, 22, 18, 0.6);
+    padding: 14px 16px;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+  }
+  .drive-card:hover:not(.disabled) {
+    border-color: rgba(223, 245, 154, 0.25);
+    background: rgba(26, 30, 26, 0.5);
+    transform: translateY(-1px);
+  }
+  .drive-card.selected {
+    border-color: rgba(223, 245, 154, 0.35);
+    background: rgba(223, 245, 154, 0.05);
+  }
+  .drive-card.disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
+  }
+  .drive-card-icon {
+    color: #dff59a;
+    flex-shrink: 0;
+  }
+  .drive-card-info {
+    display: grid;
+    gap: 1px;
+    min-width: 0;
+  }
+  .drive-letter {
+    font-size: 16px;
+    font-weight: 800;
+    color: #ebe4d6;
+  }
+  .drive-name {
+    font-size: 12px;
+    color: #9a948a;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .drive-card-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+  .drive-fstype {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border: 1px solid rgba(223, 245, 154, 0.1);
+    border-radius: 999px;
+    color: #6b665e;
+  }
+  .drive-card.selected .drive-fstype {
+    border-color: rgba(223, 245, 154, 0.25);
+    color: #dff59a;
+  }
+  .drive-free {
+    font-size: 10px;
+    color: #6b665e;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .preview-notice {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: 36rem;
+    margin: 0 auto;
+    padding: 14px 18px;
+    border: 1px solid rgba(255, 177, 153, 0.15);
+    border-radius: 10px;
+    background: rgba(255, 177, 153, 0.04);
+    color: #9a948a;
+  }
+  .preview-notice svg {
+    flex-shrink: 0;
+    color: #ffb199;
+  }
+  .preview-notice p {
+    margin: 0;
+    font-size: 13px;
+  }
+
+  .loading-text,
+  .no-drives {
+    color: #6b665e;
+    margin: 0;
+  }
+
+  /* ── Scan screen ───────────────────────────────────────── */
+  .scan-screen {
+    display: grid;
+    place-items: center;
+    height: 100%;
+  }
+  .scan-card {
+    display: grid;
+    gap: 12px;
+    width: min(34rem, 100% - 4rem);
+    padding: clamp(1.5rem, 4vw, 2.5rem);
+    border: 1px solid rgba(223, 245, 154, 0.1);
+    border-radius: 14px;
+    background:
+      radial-gradient(ellipse at 20% 20%, rgba(223, 245, 154, 0.06), transparent 60%),
+      rgba(12, 14, 12, 0.5);
+    backdrop-filter: blur(16px);
+    text-align: center;
+  }
+  .scan-header {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #dff59a;
+  }
+  .scan-big-text {
+    font-size: clamp(1.8rem, 3.4vw, 2.8rem);
+    font-weight: 850;
+    line-height: 1.1;
+    color: #ebe4d6;
+  }
+  .scan-details {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #6b665e;
+  }
+  .scan-details span + span::before {
+    content: "·";
+    margin: 0 4px;
+    color: #343b2e;
+  }
+  .progress-bar {
+    height: 6px;
+    border-radius: 999px;
+    background: rgba(223, 245, 154, 0.08);
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #dff59a, #f2b16f);
+    transition: width 480ms cubic-bezier(0.16, 1, 0.3, 1);
+    position: relative;
+  }
+  .progress-fill::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.3) 50%, rgba(255, 255, 255, 0) 100%);
+    animation: sheen 1.5s linear infinite;
+    transform: translateX(-100%);
+  }
+  .progress-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: #9a948a;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── Error screen ──────────────────────────────────────── */
+  .error-screen {
+    display: grid;
+    place-items: center;
+    gap: 12px;
+    height: 100%;
+    text-align: center;
+    padding: 2rem;
+  }
+  .error-screen h2 {
+    margin: 0;
+    color: #ffb199;
+    font-size: 1.3rem;
+  }
+  .error-screen p {
+    margin: 0;
+    color: #9a948a;
+    max-width: 28rem;
+  }
+
+  /* ── Results screen ────────────────────────────────────── */
+  .results-screen {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+  }
+
+  .results-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 18px;
+    box-sizing: border-box;
+    flex-shrink: 0;
+  }
+  .toolbar-left,
+  .toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .back-btn {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgba(223, 245, 154, 0.1);
+    border-radius: 6px;
+    background: transparent;
+    color: #9a948a;
+    cursor: pointer;
+    flex-shrink: 0;
+    padding: 0;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  .back-btn:hover {
+    background: rgba(223, 245, 154, 0.08);
+    color: #dff59a;
+  }
+
+  .breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .bc-sep {
+    color: #343b2e;
+    font-size: 12px;
+  }
+  .bc-item {
+    max-width: 10rem;
+    overflow: hidden;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: #d1c9ba;
+    cursor: pointer;
+    padding: 3px 6px;
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  .bc-item:hover {
+    background: rgba(223, 245, 154, 0.08);
+    color: #dff59a;
+  }
+
+  .tabs {
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    background: rgba(26, 30, 26, 0.6);
+    border: 1px solid rgba(223, 245, 154, 0.08);
+    border-radius: 8px;
+  }
+  .tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 26px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #6b665e;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 12px;
+    transition: color 120ms ease, background 120ms ease;
+  }
+  .tab:hover:not(.active) {
+    color: #d1c9ba;
+  }
+  .tab.active {
+    background: rgba(223, 245, 154, 0.1);
+    color: #dff59a;
+  }
+
+  .results-content {
+    flex: 1;
+    min-height: 0;
+    padding: 0 18px 18px;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+
+  .context-hint {
+    position: absolute;
+    left: 18px;
+    bottom: 14px;
+    font-size: 11px;
+    color: #4a463e;
+    pointer-events: none;
+    z-index: 5;
+    transition: opacity 400ms ease;
+  }
+
+  /* ── Sidebar ───────────────────────────────────────────── */
+  .sidebar {
+    flex: 0 0 18rem;
+    min-height: 0;
+    overflow: hidden;
+    border-left: 1px solid rgba(223, 245, 154, 0.06);
+    background: rgba(12, 14, 12, 0.85);
+    backdrop-filter: blur(12px);
+  }
+
+  /* ── Bottom bar ────────────────────────────────────────── */
+  .bottom-bar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 0 14px;
+    background: rgba(12, 14, 12, 0.92);
+    backdrop-filter: blur(12px);
+    border-top: 1px solid rgba(223, 245, 154, 0.06);
+    font-size: 11px;
+    overflow-x: auto;
+  }
+  .bottom-stat {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+  }
+  .bottom-stat .label {
+    color: #4a463e;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 10px;
+  }
+  .bottom-stat .value {
+    color: #9a948a;
+    font-variant-numeric: tabular-nums;
+    font-weight: 650;
+  }
+  .separator {
+    width: 1px;
+    height: 14px;
+    background: rgba(223, 245, 154, 0.06);
+  }
+
+  .debug-panel {
+    margin-left: auto;
+    font-size: 10px;
+    color: #4a463e;
+  }
+  .debug-panel summary {
+    cursor: pointer;
+    list-style: none;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    transition: color 120ms ease;
+  }
+  .debug-panel summary:hover {
+    color: #9a948a;
+  }
+  .debug-panel summary::marker {
+    content: "▸ ";
+  }
+  .debug-panel[open] summary::marker {
+    content: "▾ ";
+  }
+  .debug-content {
+    display: inline-flex;
+    gap: 12px;
+    margin-top: 4px;
+  }
+  .debug-content span {
+    white-space: nowrap;
+  }
+  .debug-content strong {
+    color: #6b665e;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── Animations ────────────────────────────────────────── */
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  @keyframes sheen {
+    to { transform: translateX(100%); }
+  }
+
+  /* ── Responsive ────────────────────────────────────────── */
+  @media (max-width: 768px) {
     :global(body) {
       overflow: auto;
     }
-
-    .app-shell {
-      grid-template-columns: 1fr;
-      grid-template-rows: auto auto minmax(30rem, 1fr) auto auto;
-      grid-template-areas:
-        "rail"
-        "hud"
-        "canvas"
-        "drawer"
-        "telemetry";
+    .app {
+      grid-template-rows: auto minmax(0, 1fr) auto;
       height: auto;
       min-height: 100vh;
       overflow: visible;
     }
-
-    .rail {
-      flex-direction: row;
-      justify-content: flex-start;
+    .top-bar {
+      flex-wrap: wrap;
+      gap: 8px;
       padding: 8px 12px;
-      border-right: 0;
-      border-bottom: 1px solid var(--line-soft);
     }
-
-    .rail-brand {
-      margin: 0 12px 0 0;
-    }
-
-    .rail-btn.active::before {
-      left: 50%;
-      bottom: -8px;
-      top: auto;
-      width: 16px;
-      height: 3px;
-      border-radius: 2px 2px 0 0;
-      transform: translateX(-50%);
-    }
-
-    .rail-divider {
-      width: 1px;
-      height: 20px;
-      margin: 0 4px;
-    }
-
-    .hud,
-    .hud-left,
-    .hud-right {
-      align-items: stretch;
-      flex-direction: column;
-    }
-
-    .hud {
-      padding: 12px;
-    }
-
-    .drive-picker,
-    .hud-btn {
+    .top-bar-left {
       width: 100%;
     }
-
-    .workspace,
-    .start-board,
-    .analysis-rail {
-      grid-template-columns: 1fr;
-      grid-template-rows: auto auto;
+    .top-bar-right {
+      width: 100%;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 6px;
     }
-
-    .canvas-zone {
-      min-height: 34rem;
-    }
-
-    .visual-stage {
-      min-height: 30rem;
-    }
-
-    .analysis-rail {
-      min-height: 34rem;
-    }
-
-    .inspector,
-    .start-copy {
-      border-left: 0;
-      border-right: 0;
-      border-top: 1px solid var(--line-soft);
-    }
-
-    .drawer {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-    }
-
-    .drawer i {
+    .stats-row {
       display: none;
     }
-
-    .drawer-progress {
-      grid-column: 1 / -1;
+    .sidebar {
+      flex: 1 1 auto;
+      border-left: 0;
+      border-top: 1px solid rgba(223, 245, 154, 0.06);
     }
-
-    .telemetry,
-    .telemetry div {
-      align-items: flex-start;
+    .main-area {
       flex-direction: column;
+    }
+    .results-content {
+      min-height: 42vh;
+    }
+    .results-screen {
+      min-height: 100vh;
+    }
+    .start-content {
+      padding: 1rem;
+    }
+    .drive-grid {
+      grid-template-columns: 1fr;
+    }
+    .bottom-bar {
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 6px 12px;
+    }
+    .debug-panel {
+      margin-left: 0;
+      width: 100%;
+    }
+    .debug-content {
+      flex-wrap: wrap;
     }
   }
 </style>

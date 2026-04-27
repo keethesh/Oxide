@@ -45,6 +45,7 @@
   let childrenByParent = $state(new Map<number, LoadedChildren>());
   let expanded = $state(new Set<number>());
   let loadingParents = $state(new Set<number>());
+  let loading = $state(false);
   let error = $state("");
   let scrollTop = $state(0);
   let viewportHeight = $state(320);
@@ -55,13 +56,11 @@
 
   function handleSearchInput(value: string) {
     searchQuery = value;
-    if (searchDebounceTimer) {
-      clearTimeout(searchDebounceTimer);
-    }
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
     searchDebounceTimer = setTimeout(() => {
       debouncedQuery = value;
       searchDebounceTimer = null;
-    }, 150);
+    }, 200);
   }
 
   function isExpanded(id: number) {
@@ -167,6 +166,7 @@
     const requestGeneration = generation;
     const offset = reset || !existing ? 0 : existing.items.length;
 
+    loading = true;
     addLoading(parentId);
     try {
       const page = await invoke<ChildPage>("get_children", {
@@ -193,6 +193,7 @@
     } finally {
       if (requestGeneration === generation) {
         removeLoading([parentId]);
+        loading = false;
       }
     }
   }
@@ -238,18 +239,23 @@
 
   function buildVisibleRows(parentId: number, depth: number): VisibleRow[] {
     const page = getChildren(parentId);
-    if (!page) {
-      return [];
-    }
+    if (!page) return [];
 
     const rows: VisibleRow[] = [];
-    const query = searchQuery.toLowerCase();
+    const queryLower = debouncedQuery.toLowerCase();
+    const showAll = !debouncedQuery;
 
     for (const node of page.items) {
-      const matchesQuery = query && node.name.toLowerCase().includes(query);
-      const shouldShow = !query || matchesQuery || (node.is_dir && hasMatchingDescendant(node.id, query));
+      let matchesNode = showAll || node.name.toLowerCase().includes(queryLower);
 
-      if (shouldShow) {
+      // When searching, also match if an expanded descendant matches
+      if (!showAll && node.is_dir && isExpanded(node.id)) {
+        if (!matchesNode) {
+          matchesNode = hasMatchingDescendant(node.id, queryLower);
+        }
+      }
+
+      if (matchesNode) {
         rows.push({
           key: `node:${node.id}`,
           kind: "node",
@@ -258,17 +264,14 @@
         });
       }
 
+      // Only recurse into expanded directories
       if (node.is_dir && isExpanded(node.id)) {
-        const childRows = buildVisibleRows(node.id, depth + 1);
-        if (query) {
-          rows.push(...childRows);
-        } else {
-          rows.push(...childRows);
-        }
+        rows.push(...buildVisibleRows(node.id, depth + 1));
       }
     }
 
-    if (page.nextOffset !== null && !query) {
+    // Load-more button (hidden when searching)
+    if (page.nextOffset !== null && showAll) {
       rows.push({
         key: `more:${parentId}:${page.items.length}`,
         kind: "load-more",
@@ -281,33 +284,21 @@
     return rows;
   }
 
-  function hasMatchingDescendant(parentId: number, query: string): boolean {
+  function hasMatchingDescendant(parentId: number, queryLower: string): boolean {
+    // Only check loaded + expanded children — don't recurse into unloaded subtrees.
+    // Keeps search O(loaded_nodes) instead of O(all_nodes).
     const page = getChildren(parentId);
-    if (!page) {
-      return false;
-    }
+    if (!page) return false;
     for (const node of page.items) {
-      if (node.name.toLowerCase().includes(query)) {
-        return true;
-      }
-      if (node.is_dir && hasMatchingDescendant(node.id, query)) {
-        return true;
-      }
+      if (node.name.toLowerCase().includes(queryLower)) return true;
+      if (node.is_dir && isExpanded(node.id) && hasMatchingDescendant(node.id, queryLower)) return true;
     }
     return false;
   }
 
   const visibleRows = $derived.by(() => {
     if (!scanLoaded) return [];
-    const rows = buildVisibleRows(scanRootId, 0);
-    if (debouncedQuery) {
-      const q = debouncedQuery.toLowerCase();
-      return rows.filter(row => {
-        if (row.kind !== "node") return true;
-        return row.node.name.toLowerCase().includes(q) || hasMatchingDescendant(row.node.id, q);
-      });
-    }
-    return rows;
+    return buildVisibleRows(scanRootId, 0);
   });
   const totalHeight = $derived(Math.max(visibleRows.length * ROW_HEIGHT, ROW_HEIGHT));
   const startIndex = $derived(Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN));
