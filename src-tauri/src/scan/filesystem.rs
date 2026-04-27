@@ -20,7 +20,7 @@ pub fn scan(
     root_path: PathBuf,
     sink: &mut dyn ProgressSink,
     progress: &mut ScanProgress,
-    started_at: Instant,
+    _started_at: Instant,
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<FileTree, String> {
     if cancel_flag.load(Ordering::SeqCst) {

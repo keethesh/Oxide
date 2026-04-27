@@ -110,7 +110,7 @@ pub fn scan(
     drive_letter: char,
     sink: &mut dyn ProgressSink,
     progress: &mut ScanProgress,
-    started_at: Instant,
+    _started_at: Instant,
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<FileTree, MftScanError> {
     if cancel_flag.load(Ordering::SeqCst) {

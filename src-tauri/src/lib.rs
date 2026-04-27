@@ -5,6 +5,7 @@ pub mod treemap;
 
 use core::file_entry::FileEntry;
 use core::file_tree::{ChildPage, FilePathRow, FileRow, FileTree};
+use crate::scan::{ProgressSink, WindowProgressSink};
 use scan::progress::ScanProgress;
 use scan::types::{
     FallbackReason, LaunchScanRequest, PrepareScanAction, PrepareScanResult, ScanMode, ScanResult,
@@ -281,15 +282,17 @@ async fn scan_drive(
     let fallback_reason = prepared_scan.and_then(|prepared| prepared.fallback_reason);
     let drive = drive_letter_char(&drive_letter);
     let root_path = PathBuf::from(format!("{drive_letter}\\"));
-    let window_clone = window.clone();
     let drive_letter_clone = drive_letter.clone();
+    let window_clone = window.clone();
     let cancel_flag = state.scan_cancelled.clone();
 
     cancel_flag.store(false, Ordering::SeqCst);
 
     let (tree, mut result) = tokio::task::spawn_blocking(move || {
+        let scan_started_at = Instant::now();
+        let mut sink = WindowProgressSink::new(&window_clone, scan_started_at);
         run_scan(
-            &window_clone,
+            &mut sink,
             &drive_letter_clone,
             drive,
             root_path,
@@ -694,7 +697,7 @@ pub fn run() {
 }
 
 fn run_scan(
-    window: &tauri::Window,
+    sink: &mut dyn ProgressSink,
     drive_letter: &str,
     drive: char,
     root_path: PathBuf,
@@ -705,7 +708,7 @@ fn run_scan(
     let started_at = Instant::now();
     let mut progress = ScanProgress::new("Preparing scan", Some(requested_mode));
     progress.fallback_reason = initial_fallback;
-    scan::emit_progress(window, &mut progress, started_at);
+    sink.emit(&mut progress);
 
     if cancel_flag.load(Ordering::SeqCst) {
         return Err("Scan cancelled".to_string());
@@ -713,7 +716,7 @@ fn run_scan(
 
     let scan_started_at = Instant::now();
     let (mut tree, actual_mode, fallback_reason) = match requested_mode {
-        ScanMode::Mft => match scan::mft::scan(drive, window, &mut progress, started_at, cancel_flag) {
+        ScanMode::Mft => match scan::mft::scan(drive, sink, &mut progress, started_at, cancel_flag) {
             Ok(tree) => (tree, ScanMode::Mft, initial_fallback),
             Err(error) => {
                 if cancel_flag.load(Ordering::SeqCst) {
@@ -724,15 +727,15 @@ fn run_scan(
                     Some(ScanMode::Filesystem),
                 );
                 progress.fallback_reason = Some(error.reason);
-                scan::emit_progress(window, &mut progress, started_at);
+                sink.emit(&mut progress);
 
                 let mut fallback_progress =
                     ScanProgress::new("Walking filesystem", Some(ScanMode::Filesystem));
                 fallback_progress.fallback_reason = Some(error.reason);
-                scan::emit_progress(window, &mut fallback_progress, started_at);
+                sink.emit(&mut fallback_progress);
 
                 let tree =
-                    scan::filesystem::scan(root_path, window, &mut fallback_progress, started_at, cancel_flag)
+                    scan::filesystem::scan(root_path, sink, &mut fallback_progress, started_at, cancel_flag)
                         .map_err(|err| format!("Failed to scan {}: {err}", drive_letter))?;
                 progress = fallback_progress;
                 (tree, ScanMode::Filesystem, Some(error.reason))
@@ -741,9 +744,9 @@ fn run_scan(
         ScanMode::Filesystem => {
             progress.phase = "Walking filesystem".to_string();
             progress.scan_mode = Some(ScanMode::Filesystem);
-            scan::emit_progress(window, &mut progress, started_at);
+            sink.emit(&mut progress);
 
-            let tree = scan::filesystem::scan(root_path, window, &mut progress, started_at, cancel_flag)
+            let tree = scan::filesystem::scan(root_path, sink, &mut progress, started_at, cancel_flag)
                 .map_err(|err| format!("Failed to scan {}: {err}", drive_letter))?;
             (tree, ScanMode::Filesystem, initial_fallback)
         }
@@ -755,21 +758,21 @@ fn run_scan(
     progress.phase = "Aggregating sizes".to_string();
     progress.scan_mode = Some(actual_mode);
     progress.fallback_reason = fallback_reason;
-    scan::emit_progress(window, &mut progress, started_at);
+    sink.emit(&mut progress);
 
     let aggregate_started_at = Instant::now();
     tree.aggregate_sizes();
     let aggregate_ms = elapsed_ms(aggregate_started_at);
 
     progress.phase = "Indexing largest files".to_string();
-    scan::emit_progress(window, &mut progress, started_at);
+    sink.emit(&mut progress);
     let largest_files_started_at = Instant::now();
     tree.rebuild_largest_files();
     let largest_files_ms = elapsed_ms(largest_files_started_at);
 
     progress.phase = "Completed".to_string();
     progress.done = true;
-    scan::emit_progress(window, &mut progress, started_at);
+    sink.emit(&mut progress);
     let total_ms = elapsed_ms(started_at);
 
     Ok((

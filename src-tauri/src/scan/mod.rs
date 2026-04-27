@@ -7,6 +7,7 @@ use crate::core::file_entry::FileEntry;
 use crate::core::file_tree::FileTree;
 use progress::ScanProgress;
 use std::time::Instant;
+use tauri::Emitter;
 
 pub(crate) fn add_entry(tree: &mut FileTree, name: &str, size: u64, flags: u16) -> u32 {
     let (name_offset, name_len) = tree.names.push(name);
@@ -41,9 +42,10 @@ impl<'a> WindowProgressSink<'a> {
 }
 
 impl ProgressSink for WindowProgressSink<'_> {
-    fn emit(&mut self, progress: &mut ScanProgress) {
-        progress.duration_ms = self.started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        let _ = self.window.emit("scan-progress", progress.clone());
+    fn emit(&mut self, progress: &ScanProgress) {
+        let mut p = progress.clone();
+        p.duration_ms = self.started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let _ = self.window.emit("scan-progress", p);
     }
 }
 
@@ -51,5 +53,5 @@ impl ProgressSink for WindowProgressSink<'_> {
 pub struct SilentProgressSink;
 
 impl ProgressSink for SilentProgressSink {
-    fn emit(&mut self, _progress: &mut ScanProgress) {}
+    fn emit(&mut self, _progress: &ScanProgress) {}
 }
