@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A11y**: Added proper ARIA attributes throughout (labels, roles, live regions, pressed states)
 - **A11y**: Fixed invalid self-closing tags on non-void HTML elements
 
+### Fixed
+- Release binary now includes version in filename (oxide-v0.4.0.exe)
+- UAC elevation no longer opens duplicate window (closes original process)
+
 ## [0.3.0] - 2026-04-27
 
 ### Added
