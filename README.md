@@ -42,18 +42,26 @@ Not implemented yet:
 
 Latest captured local baseline on the maintainer's `C:` volume:
 
-| Metric | Oxide |
-| --- | ---: |
-| Scan mode | `mft` |
-| Files | `4,041,909` |
-| Folders | `733,450` |
-| Total nodes | `4,775,359` |
-| Data size | `369 GB` |
-| Scan phase | `15.08 s` |
-| Aggregation | `210 ms` |
-| Largest-file index | `175 ms` |
-| Total backend time | `15.48 s` |
-| Memory after scan | `358 MB` |
+| Metric | Oxide 0.2.2 | **Oxide 0.3.0** |
+| --- | ---: | ---: |
+| Scan mode | `mft` | `mft` |
+| Files | `4,041,909` | `4,841,051` |
+| Folders | `733,450` | _\~same_ |
+| Total nodes | `4,775,359` | `4,841,052` |
+| Data size | `369 GB` | _\~same_ |
+| Scan phase | `15.08 s` | **`9.05 s` (−40%)** |
+| Aggregation | `210 ms` | `288 ms` (release) |
+| Largest-file index | `175 ms` | **`33 ms` (−81%)** |
+| Total backend time | `15.48 s` | **`9.4 s` (−39%)** |
+| Memory after scan | `358 MB` | _\~same_ |
+
+Key improvements in 0.3.0:
+- **Release LTO build** with `opt-level=3`, `lto="fat"`, `codegen-units=1`
+- **CLI profile mode** (`oxide.exe profile <drive>`) for automated benchmarking
+- **Debounced search inputs** (150ms) in folder/file views
+- **`VecDeque` LRU caches** for O(1) eviction (was O(n))
+- **MFT fixup optimization** — skip copy when not needed
+- **Partial sort** for treemap overflow inputs (`select_nth_unstable`)
 
 These are engineering baselines, not universal claims. Disk cache state, elevation, drive type, antivirus activity, and file churn all matter. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for capture rules and comparison notes.
 
