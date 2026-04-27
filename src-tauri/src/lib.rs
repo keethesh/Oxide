@@ -124,7 +124,7 @@ impl TreemapLayoutCache {
 
 #[derive(Debug)]
 struct ChildSortCache {
-    entries: HashMap<u32, Vec<u32>>,
+    entries: HashMap<u32, Arc<[u32]>>,
     order: Vec<u32>,
     capacity: usize,
 }
@@ -138,14 +138,14 @@ impl ChildSortCache {
         }
     }
 
-    fn get(&mut self, node_id: u32) -> Option<Vec<u32>> {
+    fn get(&mut self, node_id: u32) -> Option<Arc<[u32]>> {
         let child_ids = self.entries.get(&node_id)?.clone();
         self.touch(node_id);
         Some(child_ids)
     }
 
     fn insert(&mut self, node_id: u32, child_ids: Vec<u32>) {
-        self.entries.insert(node_id, child_ids);
+        self.entries.insert(node_id, Arc::from(child_ids));
         self.touch(node_id);
 
         while self.order.len() > self.capacity {
@@ -338,7 +338,7 @@ async fn get_children(
         let tree = tree.read().unwrap();
         let (page, cache_insert) = if let Some(child_ids) = cached_child_ids {
             (
-                tree.get_children_page_from_sorted_ids(&child_ids, offset, limit),
+                tree.get_children_page_from_sorted_ids(child_ids.as_ref(), offset, limit),
                 None,
             )
         } else {

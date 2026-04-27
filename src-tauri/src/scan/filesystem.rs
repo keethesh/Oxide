@@ -7,12 +7,15 @@ use std::os::windows::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::Window;
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_ATTRIBUTE_SYSTEM,
 };
+
+const PROGRESS_NODE_INTERVAL: u64 = 512;
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(125);
 
 pub fn scan(
     root_path: PathBuf,
@@ -28,14 +31,17 @@ pub fn scan(
     let root_name = root_path.to_string_lossy().to_string();
     let mut tree = FileTree::with_root(&root_name);
     let mut stack = vec![(root_path, tree.root_id())];
+    let mut last_progress_emit_at = Instant::now();
 
     while let Some((path, parent_id)) = stack.pop() {
         if cancel_flag.load(Ordering::SeqCst) {
             return Err("Scan cancelled".to_string());
         }
 
-        progress.phase = format!("Walking {}", path.display());
-        emit_progress(window, progress, started_at);
+        if should_emit_progress(&mut last_progress_emit_at) {
+            progress.phase = format!("Walking {}", path.display());
+            emit_progress(window, progress, started_at);
+        }
 
         let entries = match fs::read_dir(&path) {
             Ok(entries) => entries,
@@ -87,11 +93,26 @@ pub fn scan(
                 progress.bytes_scanned = progress.bytes_scanned.saturating_add(metadata.len());
             }
 
-            if progress.files_scanned.saturating_add(progress.dirs_scanned) % 512 == 0 {
+            if progress
+                .files_scanned
+                .saturating_add(progress.dirs_scanned)
+                % PROGRESS_NODE_INTERVAL
+                == 0
+                && should_emit_progress(&mut last_progress_emit_at)
+            {
                 emit_progress(window, progress, started_at);
             }
         }
     }
 
     Ok(tree)
+}
+
+fn should_emit_progress(last_progress_emit_at: &mut Instant) -> bool {
+    if last_progress_emit_at.elapsed() < PROGRESS_EMIT_INTERVAL {
+        return false;
+    }
+
+    *last_progress_emit_at = Instant::now();
+    true
 }
