@@ -158,8 +158,11 @@ pub fn scan(
     let root_id = tree.root_id();
     let mut mft_to_index = vec![MFT_INDEX_UNMAPPED; total_records_len];
     let mut metadata_record_ids = MetadataRecordSet::new(total_records_len);
-    let mut parent_links = Vec::new();
+    let mut parent_links =
+        Vec::with_capacity(total_records_len.min(MAX_PREALLOCATED_ENTRIES).saturating_sub(1));
     let mut parsed_records = 0usize;
+    let mut parse_ms = 0u64;
+    let mut ingest_ms = 0u64;
     let mut mft_stream = mft_data_value.attach(&mut fs);
     let mut buffer = vec![0u8; CHUNK_RECORDS as usize * record_size];
 
@@ -181,6 +184,7 @@ pub fn scan(
             .read_exact(&mut buffer)
             .map_err(|err| map_read_error(err, false))?;
 
+        let parse_started_at = Instant::now();
         let parsed_entries: Vec<_> = buffer
             .par_chunks(record_size)
             .enumerate()
@@ -196,7 +200,9 @@ pub fn scan(
             )
             .filter_map(|entry| entry)
             .collect();
+        parse_ms = parse_ms.saturating_add(elapsed_ms(parse_started_at));
 
+        let ingest_started_at = Instant::now();
         for entry in parsed_entries {
             if should_skip_mft_entry(&entry, &metadata_record_ids) {
                 metadata_record_ids.insert(entry.id);
@@ -216,6 +222,8 @@ pub fn scan(
             }
         }
 
+        ingest_ms = ingest_ms.saturating_add(elapsed_ms(ingest_started_at));
+
         if chunk_end == total_records
             || chunk_end.saturating_sub(last_progress_record) >= PROGRESS_RECORD_INTERVAL
         {
@@ -233,7 +241,14 @@ pub fn scan(
         ));
     }
 
+    let link_started_at = Instant::now();
     link_mft_entries(&mut tree, &parent_links, &mft_to_index, root_id);
+    let link_ms = elapsed_ms(link_started_at);
+
+    eprintln!(
+        "oxide mft profile records={} parsed={} parse_ms={} ingest_ms={} link_ms={}",
+        total_records, parsed_records, parse_ms, ingest_ms, link_ms
+    );
 
     Ok(tree)
 }
@@ -369,6 +384,10 @@ fn map_ntfs_error(err: ntfs::NtfsError) -> MftScanError {
         FallbackReason::MftReadError,
         format!("Failed to read NTFS volume: {err}"),
     )
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
 }
 
 fn map_read_error(err: std::io::Error, is_probe: bool) -> MftScanError {
