@@ -30,6 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 pub struct AppState {
     tree: Arc<RwLock<FileTree>>,
     treemap_layout_cache: Arc<Mutex<TreemapLayoutCache>>,
+    children_sort_cache: Arc<Mutex<ChildSortCache>>,
     prepared_scan: Mutex<Option<PreparedScanState>>,
     launch_scan_request: Mutex<Option<String>>,
     scan_cancelled: Arc<AtomicBool>,
@@ -44,6 +45,7 @@ struct PreparedScanState {
 
 const TREEMAP_MAX_RECTS: usize = 400;
 const TREEMAP_CACHE_CAPACITY: usize = 16;
+const CHILDREN_SORT_CACHE_CAPACITY: usize = 64;
 const TREEMAP_BUCKET_SIZE: f32 = 32.0;
 const TREEMAP_RECURSE_MIN_SIDE: f32 = 72.0;
 const TREEMAP_RECURSE_PADDING: f32 = 1.0;
@@ -117,6 +119,51 @@ impl TreemapLayoutCache {
     fn touch(&mut self, key: LayoutCacheKey) {
         self.order.retain(|existing| existing != &key);
         self.order.push(key);
+    }
+}
+
+#[derive(Debug)]
+struct ChildSortCache {
+    entries: HashMap<u32, Vec<u32>>,
+    order: Vec<u32>,
+    capacity: usize,
+}
+
+impl ChildSortCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: Vec::new(),
+            capacity,
+        }
+    }
+
+    fn get(&mut self, node_id: u32) -> Option<Vec<u32>> {
+        let child_ids = self.entries.get(&node_id)?.clone();
+        self.touch(node_id);
+        Some(child_ids)
+    }
+
+    fn insert(&mut self, node_id: u32, child_ids: Vec<u32>) {
+        self.entries.insert(node_id, child_ids);
+        self.touch(node_id);
+
+        while self.order.len() > self.capacity {
+            if let Some(oldest_key) = self.order.first().copied() {
+                self.order.remove(0);
+                self.entries.remove(&oldest_key);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    fn touch(&mut self, node_id: u32) {
+        self.order.retain(|existing| existing != &node_id);
+        self.order.push(node_id);
     }
 }
 
@@ -253,6 +300,7 @@ async fn scan_drive(
     *state_tree = tree;
     drop(state_tree);
     state.treemap_layout_cache.lock().unwrap().clear();
+    state.children_sort_cache.lock().unwrap().clear();
     let store_ms = elapsed_ms(store_started_at);
     result.timings.store_ms = store_ms;
     result.timings.total_ms = result.timings.total_ms.saturating_add(store_ms);
@@ -280,15 +328,35 @@ async fn get_children(
     limit: usize,
 ) -> Result<ChildPage, String> {
     let tree = state.tree.clone();
+    let cache = state.children_sort_cache.clone();
     tokio::task::spawn_blocking(move || {
         let started_at = Instant::now();
+
+        let cached_child_ids = cache.lock().unwrap().get(node_id);
+        let cache_hit = cached_child_ids.is_some();
+
         let tree = tree.read().unwrap();
-        let page = tree.get_children_page(node_id, offset, limit);
+        let (page, cache_insert) = if let Some(child_ids) = cached_child_ids {
+            (
+                tree.get_children_page_from_sorted_ids(&child_ids, offset, limit),
+                None,
+            )
+        } else {
+            let child_ids = tree.get_sorted_child_ids(node_id);
+            let page = tree.get_children_page_from_sorted_ids(&child_ids, offset, limit);
+            (page, Some(child_ids))
+        };
+        drop(tree);
+
+        if let Some(child_ids) = cache_insert {
+            cache.lock().unwrap().insert(node_id, child_ids);
+        }
+
         log_slow_query(
             "get_children",
             started_at,
             format!(
-                "node_id={node_id} returned={} total={}",
+                "node_id={node_id} returned={} total={} cache_hit={cache_hit}",
                 page.items.len(),
                 page.total
             ),
@@ -585,6 +653,9 @@ pub fn run() {
             treemap_layout_cache: Arc::new(Mutex::new(TreemapLayoutCache::new(
                 TREEMAP_CACHE_CAPACITY,
             ))),
+            children_sort_cache: Arc::new(Mutex::new(ChildSortCache::new(
+                CHILDREN_SORT_CACHE_CAPACITY,
+            ))),
             prepared_scan: Mutex::new(None),
             launch_scan_request: Mutex::new(parse_launch_scan_request()),
             scan_cancelled: Arc::new(AtomicBool::new(false)),
@@ -853,7 +924,6 @@ fn to_wide(value: &str) -> Vec<u16> {
 mod tests {
     use super::*;
     use crate::core::file_entry::FileFlags;
-    use std::collections::HashMap;
 
     fn dir_entry(tree: &mut FileTree, name: &str) -> u32 {
         let (name_offset, name_len) = tree.names.push(name);
@@ -887,8 +957,8 @@ mod tests {
         let root_id = tree.root_id();
         let docs = dir_entry(&mut tree, "docs");
         let orphan = file_entry(&mut tree, "orphan.bin", 100);
-        let mut lookup = HashMap::new();
-        lookup.insert(5, docs);
+        let mut lookup = vec![u32::MAX; 6];
+        lookup[5] = docs;
 
         scan::mft::link_mft_entries(&mut tree, &[(docs, 0), (orphan, 999)], &lookup, root_id);
 
@@ -902,8 +972,8 @@ mod tests {
         let root_id = tree.root_id();
         let parent = dir_entry(&mut tree, "parent");
         let child = file_entry(&mut tree, "child.bin", 25);
-        let mut lookup = HashMap::new();
-        lookup.insert(42, parent);
+        let mut lookup = vec![u32::MAX; 43];
+        lookup[42] = parent;
 
         scan::mft::link_mft_entries(&mut tree, &[(child, 42)], &lookup, root_id);
 
@@ -1027,9 +1097,9 @@ mod tests {
     fn root_directory_records_are_normalized_to_the_virtual_root() {
         let mut tree = FileTree::with_root("C:\\");
         let top_level = dir_entry(&mut tree, "Users");
-        let mut lookup = HashMap::new();
+        let mut lookup = vec![u32::MAX; 6];
         let root_id = tree.root_id();
-        lookup.insert(5, root_id);
+        lookup[5] = root_id;
 
         scan::mft::link_mft_entries(&mut tree, &[(top_level, 5)], &lookup, root_id);
 

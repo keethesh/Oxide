@@ -186,6 +186,15 @@ impl FileTree {
             };
         }
 
+        let sorted_child_ids = self.get_sorted_child_ids(id);
+        self.get_children_page_from_sorted_ids(&sorted_child_ids, offset, limit)
+    }
+
+    pub fn get_sorted_child_ids(&self, id: u32) -> Vec<u32> {
+        if !self.has_node(id) {
+            return Vec::new();
+        }
+
         let mut children = Vec::new();
         let mut child_idx = self.entries[id as usize].first_child_index;
 
@@ -194,16 +203,30 @@ impl FileTree {
             children.push(ChildCandidate {
                 id: child_idx,
                 is_dir: entry.is_dir(),
-                is_hidden: entry.is_hidden(),
                 size: entry.size,
-                has_children: entry.first_child_index != FileEntry::NULL_INDEX,
             });
             child_idx = entry.next_sibling_index;
         }
 
         sort_child_candidates(&mut children);
+        children.into_iter().map(|child| child.id).collect()
+    }
 
-        let total = children.len();
+    pub fn get_children_page_from_sorted_ids(
+        &self,
+        sorted_child_ids: &[u32],
+        offset: usize,
+        limit: usize,
+    ) -> ChildPage {
+        if limit == 0 {
+            return ChildPage {
+                items: Vec::new(),
+                total: 0,
+                next_offset: None,
+            };
+        }
+
+        let total = sorted_child_ids.len();
         if offset >= total {
             return ChildPage {
                 items: Vec::new(),
@@ -212,20 +235,25 @@ impl FileTree {
             };
         }
 
-        let items: Vec<NodeSummary> = children
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .map(|child| NodeSummary {
-                id: child.id,
-                name: self.display_name(child.id),
-                is_dir: child.is_dir,
-                is_hidden: child.is_hidden,
-                size: child.size,
-                child_count: u32::from(child.has_children),
+        let end = offset.saturating_add(limit).min(total);
+        let items: Vec<NodeSummary> = sorted_child_ids[offset..end]
+            .iter()
+            .copied()
+            .filter(|id| self.has_node(*id))
+            .map(|id| {
+                let entry = &self.entries[id as usize];
+                NodeSummary {
+                    id,
+                    name: self.display_name(id),
+                    is_dir: entry.is_dir(),
+                    is_hidden: entry.is_hidden(),
+                    size: entry.size,
+                    child_count: u32::from(entry.first_child_index != FileEntry::NULL_INDEX),
+                }
             })
             .collect();
-        let next_offset = (offset + items.len() < total).then_some(offset + items.len());
+        let consumed = end.saturating_sub(offset);
+        let next_offset = (offset + consumed < total).then_some(offset + consumed);
 
         ChildPage {
             items,
@@ -398,9 +426,7 @@ impl FileTree {
 struct ChildCandidate {
     id: u32,
     is_dir: bool,
-    is_hidden: bool,
     size: u64,
-    has_children: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

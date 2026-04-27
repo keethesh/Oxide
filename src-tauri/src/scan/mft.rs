@@ -5,7 +5,6 @@ use crate::scan::progress::ScanProgress;
 use crate::scan::types::FallbackReason;
 use ntfs::Ntfs;
 use rayon::prelude::*;
-use std::collections::HashMap;
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{BufReader, ErrorKind, Read};
@@ -28,6 +27,7 @@ const MFT_RECORD_ID: u64 = 0;
 const ROOT_RECORD_ID: u64 = 5;
 const METADATA_RECORD_IDS: [u64; 10] = [0, 1, 2, 3, 4, 6, 7, 8, 9, 10];
 const EXTEND_RECORD_ID: u64 = 11;
+const MFT_INDEX_UNMAPPED: u32 = u32::MAX;
 
 #[derive(Debug, Clone)]
 pub struct MftScanError {
@@ -144,20 +144,26 @@ pub fn scan(
             "The $MFT data stream is empty",
         ));
     }
+    let total_records_len = usize::try_from(total_records).map_err(|_| {
+        MftScanError::new(
+            FallbackReason::MftParseError,
+            "The $MFT record count exceeds platform limits",
+        )
+    })?;
 
     let mut tree = FileTree::with_root_capacity(
         &root_name,
-        (total_records as usize).min(MAX_PREALLOCATED_ENTRIES),
+        total_records_len.min(MAX_PREALLOCATED_ENTRIES),
     );
     let root_id = tree.root_id();
-    let mut mft_to_index = HashMap::new();
-    let mut metadata_record_ids = MetadataRecordSet::new(total_records as usize);
+    let mut mft_to_index = vec![MFT_INDEX_UNMAPPED; total_records_len];
+    let mut metadata_record_ids = MetadataRecordSet::new(total_records_len);
     let mut parent_links = Vec::new();
     let mut parsed_records = 0usize;
     let mut mft_stream = mft_data_value.attach(&mut fs);
     let mut buffer = vec![0u8; CHUNK_RECORDS as usize * record_size];
 
-    mft_to_index.insert(ROOT_RECORD_ID, root_id);
+    set_mft_index(&mut mft_to_index, ROOT_RECORD_ID, root_id);
 
     let mut start_record = 0u64;
     let mut last_progress_record = 0u64;
@@ -198,7 +204,7 @@ pub fn scan(
             }
 
             let node_id = add_entry(&mut tree, &entry.name, entry.size, entry.flags);
-            mft_to_index.insert(entry.id, node_id);
+            set_mft_index(&mut mft_to_index, entry.id, node_id);
             parent_links.push((node_id, entry.parent_id));
             parsed_records += 1;
 
@@ -235,16 +241,37 @@ pub fn scan(
 pub(crate) fn link_mft_entries(
     tree: &mut FileTree,
     parent_links: &[(u32, u64)],
-    mft_to_index: &HashMap<u64, u32>,
+    mft_to_index: &[u32],
     root_id: u32,
 ) {
     for (child_index, parent_mft_id) in parent_links.iter().copied() {
-        let mut parent_index = mft_to_index.get(&parent_mft_id).copied().unwrap_or(root_id);
+        let mut parent_index = lookup_mft_index(mft_to_index, parent_mft_id).unwrap_or(root_id);
         if parent_index == child_index {
             parent_index = root_id;
         }
         tree.attach_child(parent_index, child_index);
     }
+}
+
+fn set_mft_index(mft_to_index: &mut [u32], mft_record_id: u64, node_id: u32) {
+    let Some(offset) = mft_record_offset(mft_record_id) else {
+        return;
+    };
+    if let Some(slot) = mft_to_index.get_mut(offset) {
+        *slot = node_id;
+    }
+}
+
+fn lookup_mft_index(mft_to_index: &[u32], mft_record_id: u64) -> Option<u32> {
+    let offset = mft_record_offset(mft_record_id)?;
+    mft_to_index
+        .get(offset)
+        .copied()
+        .filter(|index| *index != MFT_INDEX_UNMAPPED)
+}
+
+fn mft_record_offset(mft_record_id: u64) -> Option<usize> {
+    usize::try_from(mft_record_id).ok()
 }
 
 fn open_volume(drive_letter: char) -> Result<volume::VolumeHandle, MftScanError> {
