@@ -927,7 +927,8 @@ fn relaunch_as_admin(drive_letter: &str) -> Result<(), String> {
     if result.0 as usize <= 32 {
         Err("Elevation was cancelled or failed".to_string())
     } else {
-        Ok(())
+        // Exit the current instance - the new elevated instance will take over
+        std::process::exit(0);
     }
 }
 
