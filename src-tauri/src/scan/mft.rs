@@ -1,4 +1,4 @@
-use super::{add_entry, emit_progress};
+use super::{add_entry, ProgressSink};
 use crate::core::file_tree::FileTree;
 use crate::mft::{parser, sector_reader::SectorReader, volume};
 use crate::scan::progress::ScanProgress;
@@ -12,7 +12,6 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tauri::Window;
 use windows::core::HRESULT;
 use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
 use windows::Win32::Storage::FileSystem::{
@@ -109,7 +108,7 @@ pub fn probe(drive_letter: char, _cancel_flag: &Arc<AtomicBool>) -> Result<u64, 
 
 pub fn scan(
     drive_letter: char,
-    window: &Window,
+    sink: &mut dyn ProgressSink,
     progress: &mut ScanProgress,
     started_at: Instant,
     cancel_flag: &Arc<AtomicBool>,
@@ -228,7 +227,7 @@ pub fn scan(
             || chunk_end.saturating_sub(last_progress_record) >= PROGRESS_RECORD_INTERVAL
         {
             progress.phase = format!("Scanning MFT records {} / {}", chunk_end, total_records);
-            emit_progress(window, progress, started_at);
+            sink.emit(progress);
             last_progress_record = chunk_end;
         }
         start_record = chunk_end;

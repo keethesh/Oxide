@@ -1,4 +1,4 @@
-use super::{add_entry, emit_progress};
+use super::{add_entry, ProgressSink};
 use crate::core::file_entry::FileFlags;
 use crate::core::file_tree::FileTree;
 use crate::scan::progress::ScanProgress;
@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::Window;
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_ATTRIBUTE_SYSTEM,
@@ -19,7 +18,7 @@ const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(125);
 
 pub fn scan(
     root_path: PathBuf,
-    window: &Window,
+    sink: &mut dyn ProgressSink,
     progress: &mut ScanProgress,
     started_at: Instant,
     cancel_flag: &Arc<AtomicBool>,
@@ -40,7 +39,7 @@ pub fn scan(
 
         if should_emit_progress(&mut last_progress_emit_at) {
             progress.phase = format!("Walking {}", path.display());
-            emit_progress(window, progress, started_at);
+            sink.emit(progress);
         }
 
         let entries = match fs::read_dir(&path) {
@@ -100,7 +99,7 @@ pub fn scan(
                 == 0
                 && should_emit_progress(&mut last_progress_emit_at)
             {
-                emit_progress(window, progress, started_at);
+                sink.emit(progress);
             }
         }
     }
