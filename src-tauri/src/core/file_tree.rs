@@ -121,25 +121,41 @@ impl FileTree {
         if self.entries.is_empty() {
             return;
         }
-        self.calculate_node_size(self.root_id());
-    }
 
-    fn calculate_node_size(&mut self, index: u32) -> u64 {
-        let entry = self.entries[index as usize];
-        if !entry.is_dir() {
-            return entry.size;
+        let mut stack = vec![(self.root_id(), false)];
+        while let Some((node_id, visited)) = stack.pop() {
+            if node_id == FileEntry::NULL_INDEX || node_id as usize >= self.entries.len() {
+                continue;
+            }
+
+            if visited {
+                if self.entries[node_id as usize].is_dir() {
+                    let mut total = 0u64;
+                    let mut child_idx = self.entries[node_id as usize].first_child_index;
+                    while child_idx != FileEntry::NULL_INDEX {
+                        if child_idx as usize >= self.entries.len() {
+                            break;
+                        }
+                        total = total.saturating_add(self.entries[child_idx as usize].size);
+                        child_idx = self.entries[child_idx as usize].next_sibling_index;
+                    }
+                    self.entries[node_id as usize].size = total;
+                }
+                continue;
+            }
+
+            stack.push((node_id, true));
+            if self.entries[node_id as usize].is_dir() {
+                let mut child_idx = self.entries[node_id as usize].first_child_index;
+                while child_idx != FileEntry::NULL_INDEX {
+                    if child_idx as usize >= self.entries.len() {
+                        break;
+                    }
+                    stack.push((child_idx, false));
+                    child_idx = self.entries[child_idx as usize].next_sibling_index;
+                }
+            }
         }
-
-        let mut total: u64 = 0;
-        let mut child_idx = entry.first_child_index;
-
-        while child_idx != FileEntry::NULL_INDEX {
-            total = total.saturating_add(self.calculate_node_size(child_idx));
-            child_idx = self.entries[child_idx as usize].next_sibling_index;
-        }
-
-        self.entries[index as usize].size = total;
-        total
     }
 
     pub fn rebuild_largest_files(&mut self) {
@@ -169,7 +185,9 @@ impl FileTree {
         }
 
         let entry = &self.entries[id as usize];
-        self.names.get(entry.name_offset, entry.name_len).to_string()
+        self.names
+            .get(entry.name_offset, entry.name_len)
+            .to_string()
     }
 
     /// Returns the node name as a borrowed string to avoid allocation
@@ -440,10 +458,7 @@ impl FileTree {
 
     pub fn display_name(&self, id: u32) -> String {
         if id == self.root_id() {
-            return self
-                .node_name_ref(id)
-                .trim_end_matches('\\')
-                .to_string();
+            return self.node_name_ref(id).trim_end_matches('\\').to_string();
         }
 
         let name = self.node_name_ref(id);

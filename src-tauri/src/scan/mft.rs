@@ -114,7 +114,10 @@ pub fn scan(
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<FileTree, MftScanError> {
     if cancel_flag.load(Ordering::SeqCst) {
-        return Err(MftScanError::new(FallbackReason::ScanCancelled, "Scan cancelled"));
+        return Err(MftScanError::new(
+            FallbackReason::ScanCancelled,
+            "Scan cancelled",
+        ));
     }
 
     let volume = open_volume(drive_letter)?;
@@ -150,15 +153,16 @@ pub fn scan(
         )
     })?;
 
-    let mut tree = FileTree::with_root_capacity(
-        &root_name,
-        total_records_len.min(MAX_PREALLOCATED_ENTRIES),
-    );
+    let mut tree =
+        FileTree::with_root_capacity(&root_name, total_records_len.min(MAX_PREALLOCATED_ENTRIES));
     let root_id = tree.root_id();
     let mut mft_to_index = vec![MFT_INDEX_UNMAPPED; total_records_len];
     let mut metadata_record_ids = MetadataRecordSet::new(total_records_len);
-    let mut parent_links =
-        Vec::with_capacity(total_records_len.min(MAX_PREALLOCATED_ENTRIES).saturating_sub(1));
+    let mut parent_links = Vec::with_capacity(
+        total_records_len
+            .min(MAX_PREALLOCATED_ENTRIES)
+            .saturating_sub(1),
+    );
     let mut parsed_records = 0usize;
     let mut parse_ms = 0u64;
     let mut ingest_ms = 0u64;
@@ -171,7 +175,10 @@ pub fn scan(
     let mut last_progress_record = 0u64;
     while start_record < total_records {
         if cancel_flag.load(Ordering::SeqCst) {
-            return Err(MftScanError::new(FallbackReason::ScanCancelled, "Scan cancelled"));
+            return Err(MftScanError::new(
+                FallbackReason::ScanCancelled,
+                "Scan cancelled",
+            ));
         }
 
         let remaining = total_records - start_record;

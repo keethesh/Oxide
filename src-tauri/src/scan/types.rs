@@ -45,11 +45,21 @@ pub struct ScanResult {
     pub drive_letter: String,
     pub files_scanned: u64,
     pub dirs_scanned: u64,
+    pub files_skipped: u64,
+    pub dirs_skipped: u64,
+    pub errors_skipped: u64,
     pub bytes_scanned: u64,
     pub scan_mode: ScanMode,
     pub fallback_reason: Option<FallbackReason>,
     pub duration_ms: u64,
     pub timings: ScanTimings,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct ScanSkipCounts {
+    pub files_skipped: u64,
+    pub dirs_skipped: u64,
+    pub errors_skipped: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -62,7 +72,11 @@ pub struct ScanTimings {
 }
 
 impl PrepareScanResult {
-    pub fn scan(mode: ScanMode, fallback_reason: Option<FallbackReason>, total_items_estimate: Option<u64>) -> Self {
+    pub fn scan(
+        mode: ScanMode,
+        fallback_reason: Option<FallbackReason>,
+        total_items_estimate: Option<u64>,
+    ) -> Self {
         Self {
             action: PrepareScanAction::Scan,
             mode: Some(mode),

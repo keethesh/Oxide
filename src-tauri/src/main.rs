@@ -45,23 +45,29 @@ fn run_profile(args: &[String]) -> Result<(), String> {
     let started_at = Instant::now();
 
     // Try MFT first, fall back to filesystem
-    let (mut tree, actual_mode) = match oxide_lib::scan::mft::scan(
-        drive,
-        &mut sink,
-        &mut progress,
-        started_at,
-        &cancel_flag,
-    ) {
-        Ok(tree) => (tree, ScanMode::Mft),
-        Err(err) => {
-            eprintln!("MFT scan failed ({}), falling back to filesystem walk...", err.message);
-            let root_path = PathBuf::from(format!("{}:\\", drive));
-            let mut fs_progress = ScanProgress::new("Walking filesystem", Some(ScanMode::Filesystem));
-            let tree = filesystem::scan(root_path, &mut sink, &mut fs_progress, started_at, &cancel_flag)
+    let (mut tree, actual_mode) =
+        match oxide_lib::scan::mft::scan(drive, &mut sink, &mut progress, started_at, &cancel_flag)
+        {
+            Ok(tree) => (tree, ScanMode::Mft),
+            Err(err) => {
+                eprintln!(
+                    "MFT scan failed ({}), falling back to filesystem walk...",
+                    err.message
+                );
+                let root_path = PathBuf::from(format!("{}:\\", drive));
+                let mut fs_progress =
+                    ScanProgress::new("Walking filesystem", Some(ScanMode::Filesystem));
+                let scan = filesystem::scan(
+                    root_path,
+                    &mut sink,
+                    &mut fs_progress,
+                    started_at,
+                    &cancel_flag,
+                )
                 .map_err(|e| format!("Filesystem scan failed: {e}"))?;
-            (tree, ScanMode::Filesystem)
-        }
-    };
+                (scan.tree, ScanMode::Filesystem)
+            }
+        };
 
     let scan_ms = started_at.elapsed().as_millis() as u64;
 

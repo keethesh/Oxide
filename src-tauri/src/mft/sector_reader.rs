@@ -33,7 +33,11 @@ where
     }
 
     fn align_up_to_sector_size(&self, value: u64) -> u64 {
-        self.align_down_to_sector_size(value) + self.sector_size as u64
+        if value == 0 {
+            0
+        } else {
+            self.align_down_to_sector_size(value.saturating_add(self.sector_size as u64 - 1))
+        }
     }
 }
 
@@ -42,16 +46,25 @@ where
     R: Read + Seek,
 {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
         let aligned_position = self.align_down_to_sector_size(self.stream_position);
         let start = (self.stream_position - aligned_position) as usize;
-        let end = start + buf.len();
-        let aligned_bytes_to_read = self.align_up_to_sector_size(end as u64) as usize;
+        let requested_end = start + buf.len();
+        let aligned_end = self.align_up_to_sector_size(self.stream_position + buf.len() as u64);
+        let aligned_bytes_to_read = (aligned_end - aligned_position) as usize;
 
         self.temp_buf.resize(aligned_bytes_to_read, 0);
+        self.inner.seek(SeekFrom::Start(aligned_position))?;
         self.inner.read_exact(&mut self.temp_buf)?;
-        buf.copy_from_slice(&self.temp_buf[start..end]);
+        buf.copy_from_slice(&self.temp_buf[start..requested_end]);
 
         self.stream_position += buf.len() as u64;
+        self.inner.seek(SeekFrom::Start(
+            self.align_down_to_sector_size(self.stream_position),
+        ))?;
         Ok(buf.len())
     }
 }
@@ -90,5 +103,57 @@ where
                 "invalid seek to a negative or overflowing position",
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Read, Seek};
+
+    fn reader() -> SectorReader<Cursor<Vec<u8>>> {
+        SectorReader::new(Cursor::new((0u8..64).collect()), 8).unwrap()
+    }
+
+    #[test]
+    fn unaligned_sequential_reads_return_logical_bytes() {
+        let mut reader = reader();
+        reader.seek(SeekFrom::Start(3)).unwrap();
+
+        let mut first = [0; 4];
+        reader.read_exact(&mut first).unwrap();
+        let mut second = [0; 5];
+        reader.read_exact(&mut second).unwrap();
+
+        assert_eq!(first, [3, 4, 5, 6]);
+        assert_eq!(second, [7, 8, 9, 10, 11]);
+        assert_eq!(reader.stream_position, 12);
+        assert_eq!(reader.inner.stream_position().unwrap(), 8);
+    }
+
+    #[test]
+    fn seek_then_read_uses_aligned_source_offset() {
+        let mut reader = reader();
+        reader.seek(SeekFrom::Start(17)).unwrap();
+
+        let mut bytes = [0; 3];
+        reader.read_exact(&mut bytes).unwrap();
+
+        assert_eq!(bytes, [17, 18, 19]);
+        assert_eq!(reader.stream_position, 20);
+        assert_eq!(reader.inner.stream_position().unwrap(), 16);
+    }
+
+    #[test]
+    fn reads_can_span_sector_boundaries() {
+        let mut reader = reader();
+        reader.seek(SeekFrom::Start(6)).unwrap();
+
+        let mut bytes = [0; 7];
+        reader.read_exact(&mut bytes).unwrap();
+
+        assert_eq!(bytes, [6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(reader.stream_position, 13);
+        assert_eq!(reader.inner.stream_position().unwrap(), 8);
     }
 }

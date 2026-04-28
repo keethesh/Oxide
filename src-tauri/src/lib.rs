@@ -3,13 +3,13 @@ pub mod mft;
 pub mod scan;
 pub mod treemap;
 
+use crate::scan::{ProgressSink, WindowProgressSink};
 use core::file_entry::FileEntry;
 use core::file_tree::{ChildPage, FilePathRow, FileRow, FileTree};
-use crate::scan::{ProgressSink, WindowProgressSink};
 use scan::progress::ScanProgress;
 use scan::types::{
     FallbackReason, LaunchScanRequest, PrepareScanAction, PrepareScanResult, ScanMode, ScanResult,
-    ScanTimings,
+    ScanSkipCounts, ScanTimings,
 };
 use std::collections::{HashMap, VecDeque};
 use std::env;
@@ -35,6 +35,7 @@ pub struct AppState {
     prepared_scan: Mutex<Option<PreparedScanState>>,
     launch_scan_request: Mutex<Option<String>>,
     scan_cancelled: Arc<AtomicBool>,
+    scan_running: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,36 @@ struct PreparedScanState {
     drive_letter: String,
     mode: ScanMode,
     fallback_reason: Option<FallbackReason>,
+}
+
+struct ScanGuard<'a> {
+    running: &'a AtomicBool,
+    cancelled: &'a AtomicBool,
+}
+
+impl<'a> ScanGuard<'a> {
+    fn acquire(state: &'a AppState) -> Result<Self, String> {
+        Self::acquire_flags(&state.scan_running, &state.scan_cancelled)
+    }
+
+    fn acquire_flags(running: &'a AtomicBool, cancelled: &'a AtomicBool) -> Result<Self, String> {
+        if running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err("A scan is already running".to_string());
+        }
+
+        cancelled.store(false, Ordering::SeqCst);
+        Ok(Self { running, cancelled })
+    }
+}
+
+impl Drop for ScanGuard<'_> {
+    fn drop(&mut self) {
+        self.cancelled.store(false, Ordering::SeqCst);
+        self.running.store(false, Ordering::SeqCst);
+    }
 }
 
 const TREEMAP_MAX_RECTS: usize = 400;
@@ -85,17 +116,19 @@ impl TreemapLayoutCache {
         // Extract owned data in one block, then release the borrow on self.entries.
         let (cached_layout, cached_width, cached_height) = {
             let cached = self.entries.get(key)?;
-            (
-                cached.layout.clone(),
-                cached.width,
-                cached.height,
-            )
+            (cached.layout.clone(), cached.width, cached.height)
         };
         let needs_scale = (cached_width - width).abs() >= f32::EPSILON
             || (cached_height - height).abs() >= f32::EPSILON;
         self.touch(key.clone());
         if needs_scale {
-            Some(scale_layout(&cached_layout, cached_width, cached_height, width, height))
+            Some(scale_layout(
+                &cached_layout,
+                cached_width,
+                cached_height,
+                width,
+                height,
+            ))
         } else {
             Some(cached_layout)
         }
@@ -181,35 +214,48 @@ fn list_drives() -> Vec<mft::volume::DriveInfo> {
 
 #[tauri::command]
 fn cancel_scan(state: tauri::State<'_, AppState>) {
-    state.scan_cancelled.store(true, Ordering::SeqCst);
+    if state.scan_running.load(Ordering::SeqCst) {
+        state.scan_cancelled.store(true, Ordering::SeqCst);
+    }
 }
 
 #[tauri::command]
-async fn open_in_explorer(
-    state: tauri::State<'_, AppState>,
-    node_id: u32,
-) -> Result<(), String> {
+async fn open_in_explorer(state: tauri::State<'_, AppState>, node_id: u32) -> Result<(), String> {
     let tree = state.tree.clone();
-    let path = tokio::task::spawn_blocking(move || {
+    let node = tokio::task::spawn_blocking(move || {
         let tree = tree.read().unwrap();
-        tree.get_full_path(node_id)
+        explorer_target_for_node(&tree, node_id)
     })
     .await
     .map_err(|err| format!("Path query task failed: {err}"))?;
 
-    open_path_in_explorer(&path)?;
+    let (path, is_dir) = node?;
+    open_path_in_explorer(&path, is_dir)?;
     Ok(())
 }
 
-fn open_path_in_explorer(path: &str) -> Result<(), String> {
-    let wide_path = to_wide(path);
-    let operation = to_wide("open");
+fn explorer_target_for_node(tree: &FileTree, node_id: u32) -> Result<(String, bool), String> {
+    let entry = tree
+        .entries
+        .get(node_id as usize)
+        .ok_or_else(|| format!("Node {node_id} does not exist"))?;
+    let path = tree.get_full_path(node_id);
+    if path.is_empty() {
+        return Err(format!("Node {node_id} has no path"));
+    }
+    Ok((path, entry.is_dir()))
+}
+
+fn open_path_in_explorer(path: &str, is_dir: bool) -> Result<(), String> {
+    let arguments = explorer_arguments(path, is_dir);
+    let wide_explorer = to_wide("explorer.exe");
+    let wide_arguments = to_wide(&arguments);
     let result = unsafe {
         ShellExecuteW(
             None,
-            PCWSTR(operation.as_ptr()),
-            PCWSTR(wide_path.as_ptr()),
             PCWSTR::null(),
+            PCWSTR(wide_explorer.as_ptr()),
+            PCWSTR(wide_arguments.as_ptr()),
             PCWSTR::null(),
             SW_SHOWNORMAL,
         )
@@ -220,6 +266,18 @@ fn open_path_in_explorer(path: &str) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+fn explorer_arguments(path: &str, is_dir: bool) -> String {
+    if is_dir {
+        quote_windows_arg(path)
+    } else {
+        format!("/select,{}", quote_windows_arg(path))
+    }
+}
+
+fn quote_windows_arg(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\\\""))
 }
 
 #[tauri::command]
@@ -239,8 +297,9 @@ fn prepare_scan(
     }
 
     let result = if is_process_elevated()? {
-        let probe_result = scan::mft::probe(drive_letter_char(&drive_letter), &state.scan_cancelled)
-            .map_err(|error| error.reason);
+        let probe_result =
+            scan::mft::probe(drive_letter_char(&drive_letter), &state.scan_cancelled)
+                .map_err(|error| error.reason);
         plan_elevated_prepare_result(probe_result)
     } else {
         plan_unelevated_prepare_result(
@@ -278,6 +337,7 @@ async fn scan_drive(
     mode: ScanMode,
 ) -> Result<ScanResult, String> {
     let drive_letter = normalize_drive_letter(&drive_letter)?;
+    let scan_guard = ScanGuard::acquire(&state)?;
     let prepared_scan = take_prepared_scan(&state, &drive_letter, mode);
     let fallback_reason = prepared_scan.and_then(|prepared| prepared.fallback_reason);
     let drive = drive_letter_char(&drive_letter);
@@ -285,8 +345,6 @@ async fn scan_drive(
     let drive_letter_clone = drive_letter.clone();
     let window_clone = window.clone();
     let cancel_flag = state.scan_cancelled.clone();
-
-    cancel_flag.store(false, Ordering::SeqCst);
 
     let (tree, mut result) = tokio::task::spawn_blocking(move || {
         let scan_started_at = Instant::now();
@@ -326,6 +384,7 @@ async fn scan_drive(
         result.timings.total_ms
     );
 
+    drop(scan_guard);
     Ok(result)
 }
 
@@ -515,9 +574,8 @@ fn build_treemap_inputs(tree: &FileTree, root_id: u32, max_rects: usize) -> Vec<
             .sum();
 
         // Only sort the top portion we actually use
-        candidates[..overflow_start].sort_unstable_by(|a, b| {
-            b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0))
-        });
+        candidates[..overflow_start]
+            .sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         for (child_id, value) in candidates.into_iter().take(overflow_start) {
             inputs.push(LayoutInput {
@@ -582,7 +640,8 @@ fn append_treemap_layout(
     let start_index = layout.len();
     layout.extend(node_layout);
 
-    for rect in layout[start_index..].to_vec() {
+    let node_rects = layout[start_index..].to_vec();
+    for rect in node_rects {
         if layout.len() >= max_rects
             || rect.kind != LayoutRectKind::Node
             || rect.w < TREEMAP_RECURSE_MIN_SIDE
@@ -677,6 +736,7 @@ pub fn run() {
             prepared_scan: Mutex::new(None),
             launch_scan_request: Mutex::new(parse_launch_scan_request()),
             scan_cancelled: Arc::new(AtomicBool::new(false)),
+            scan_running: AtomicBool::new(false),
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -707,8 +767,9 @@ fn run_scan(
 ) -> Result<(FileTree, ScanResult), String> {
     let started_at = Instant::now();
     let mut progress = ScanProgress::new("Preparing scan", Some(requested_mode));
+    let mut skipped = ScanSkipCounts::default();
     progress.fallback_reason = initial_fallback;
-    sink.emit(&mut progress);
+    sink.emit(&progress);
 
     if cancel_flag.load(Ordering::SeqCst) {
         return Err("Scan cancelled".to_string());
@@ -716,7 +777,8 @@ fn run_scan(
 
     let scan_started_at = Instant::now();
     let (mut tree, actual_mode, fallback_reason) = match requested_mode {
-        ScanMode::Mft => match scan::mft::scan(drive, sink, &mut progress, started_at, cancel_flag) {
+        ScanMode::Mft => match scan::mft::scan(drive, sink, &mut progress, started_at, cancel_flag)
+        {
             Ok(tree) => (tree, ScanMode::Mft, initial_fallback),
             Err(error) => {
                 if cancel_flag.load(Ordering::SeqCst) {
@@ -727,28 +789,40 @@ fn run_scan(
                     Some(ScanMode::Filesystem),
                 );
                 progress.fallback_reason = Some(error.reason);
-                sink.emit(&mut progress);
+                sink.emit(&progress);
 
                 let mut fallback_progress =
                     ScanProgress::new("Walking filesystem", Some(ScanMode::Filesystem));
                 fallback_progress.fallback_reason = Some(error.reason);
-                sink.emit(&mut fallback_progress);
+                sink.emit(&fallback_progress);
 
-                let tree =
-                    scan::filesystem::scan(root_path, sink, &mut fallback_progress, started_at, cancel_flag)
-                        .map_err(|err| format!("Failed to scan {}: {err}", drive_letter))?;
+                let filesystem_scan = scan::filesystem::scan(
+                    root_path,
+                    sink,
+                    &mut fallback_progress,
+                    started_at,
+                    cancel_flag,
+                )
+                .map_err(|err| format!("Failed to scan {}: {err}", drive_letter))?;
+                skipped = filesystem_scan.skipped;
                 progress = fallback_progress;
-                (tree, ScanMode::Filesystem, Some(error.reason))
+                (
+                    filesystem_scan.tree,
+                    ScanMode::Filesystem,
+                    Some(error.reason),
+                )
             }
         },
         ScanMode::Filesystem => {
             progress.phase = "Walking filesystem".to_string();
             progress.scan_mode = Some(ScanMode::Filesystem);
-            sink.emit(&mut progress);
+            sink.emit(&progress);
 
-            let tree = scan::filesystem::scan(root_path, sink, &mut progress, started_at, cancel_flag)
-                .map_err(|err| format!("Failed to scan {}: {err}", drive_letter))?;
-            (tree, ScanMode::Filesystem, initial_fallback)
+            let filesystem_scan =
+                scan::filesystem::scan(root_path, sink, &mut progress, started_at, cancel_flag)
+                    .map_err(|err| format!("Failed to scan {}: {err}", drive_letter))?;
+            skipped = filesystem_scan.skipped;
+            (filesystem_scan.tree, ScanMode::Filesystem, initial_fallback)
         }
     };
     let scan_ms = elapsed_ms(scan_started_at);
@@ -758,21 +832,21 @@ fn run_scan(
     progress.phase = "Aggregating sizes".to_string();
     progress.scan_mode = Some(actual_mode);
     progress.fallback_reason = fallback_reason;
-    sink.emit(&mut progress);
+    sink.emit(&progress);
 
     let aggregate_started_at = Instant::now();
     tree.aggregate_sizes();
     let aggregate_ms = elapsed_ms(aggregate_started_at);
 
     progress.phase = "Indexing largest files".to_string();
-    sink.emit(&mut progress);
+    sink.emit(&progress);
     let largest_files_started_at = Instant::now();
     tree.rebuild_largest_files();
     let largest_files_ms = elapsed_ms(largest_files_started_at);
 
     progress.phase = "Completed".to_string();
     progress.done = true;
-    sink.emit(&mut progress);
+    sink.emit(&progress);
     let total_ms = elapsed_ms(started_at);
 
     Ok((
@@ -782,6 +856,9 @@ fn run_scan(
             drive_letter: drive_letter.to_string(),
             files_scanned: progress.files_scanned,
             dirs_scanned: progress.dirs_scanned,
+            files_skipped: skipped.files_skipped,
+            dirs_skipped: skipped.dirs_skipped,
+            errors_skipped: skipped.errors_skipped,
             bytes_scanned: progress.bytes_scanned,
             scan_mode: actual_mode,
             fallback_reason,
@@ -815,7 +892,11 @@ fn plan_unelevated_prepare_result(
     if relaunch_succeeded {
         PrepareScanResult::relaunching(drive_letter)
     } else {
-        PrepareScanResult::scan(ScanMode::Filesystem, Some(FallbackReason::UacDeclined), None)
+        PrepareScanResult::scan(
+            ScanMode::Filesystem,
+            Some(FallbackReason::UacDeclined),
+            None,
+        )
     }
 }
 
@@ -1021,6 +1102,24 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_sizes_handles_deep_linear_trees_iteratively() {
+        let mut tree = FileTree::with_root("C:\\");
+        let mut parent = tree.root_id();
+        for depth in 0..20_000 {
+            let dir = dir_entry(&mut tree, &format!("d{depth}"));
+            tree.attach_child(parent, dir);
+            parent = dir;
+        }
+        let file = file_entry(&mut tree, "leaf.bin", 42);
+        tree.attach_child(parent, file);
+
+        tree.aggregate_sizes();
+
+        assert_eq!(tree.entries[tree.root_id() as usize].size, 42);
+        assert_eq!(tree.entries[parent as usize].size, 42);
+    }
+
+    #[test]
     fn child_pages_are_sorted_and_paginated() {
         let mut tree = FileTree::with_root("C:\\");
         let folder = dir_entry(&mut tree, "folder");
@@ -1094,6 +1193,42 @@ mod tests {
     }
 
     #[test]
+    fn explorer_target_rejects_invalid_nodes() {
+        let tree = FileTree::with_root("C:\\");
+
+        let err = explorer_target_for_node(&tree, 999).unwrap_err();
+
+        assert_eq!(err, "Node 999 does not exist");
+    }
+
+    #[test]
+    fn explorer_arguments_select_files_and_open_directories() {
+        assert_eq!(
+            explorer_arguments("C:\\folder\\file.txt", false),
+            "/select,\"C:\\folder\\file.txt\""
+        );
+        assert_eq!(explorer_arguments("C:\\folder", true), "\"C:\\folder\"");
+    }
+
+    #[test]
+    fn explorer_target_reports_file_or_directory_kind() {
+        let mut tree = FileTree::with_root("C:\\");
+        let folder = dir_entry(&mut tree, "folder");
+        let file = file_entry(&mut tree, "file.txt", 5);
+        tree.attach_child(tree.root_id(), folder);
+        tree.attach_child(folder, file);
+
+        assert_eq!(
+            explorer_target_for_node(&tree, folder),
+            Ok(("C:\\folder".to_string(), true))
+        );
+        assert_eq!(
+            explorer_target_for_node(&tree, file),
+            Ok(("C:\\folder\\file.txt".to_string(), false))
+        );
+    }
+
+    #[test]
     fn file_path_rows_return_only_requested_ids() {
         let mut tree = FileTree::with_root("C:\\");
         let folder = dir_entry(&mut tree, "folder");
@@ -1145,6 +1280,25 @@ mod tests {
         assert_eq!(result.action, PrepareScanAction::Scan);
         assert_eq!(result.mode, Some(ScanMode::Filesystem));
         assert_eq!(result.fallback_reason, Some(FallbackReason::UacDeclined));
+    }
+
+    #[test]
+    fn scan_guard_rejects_overlap_and_resets_cancellation_on_drop() {
+        let running = AtomicBool::new(false);
+        let cancelled = AtomicBool::new(true);
+
+        let guard = ScanGuard::acquire_flags(&running, &cancelled).unwrap();
+
+        assert!(running.load(Ordering::SeqCst));
+        assert!(!cancelled.load(Ordering::SeqCst));
+        let overlap = ScanGuard::acquire_flags(&running, &cancelled);
+        assert!(matches!(overlap, Err(message) if message == "A scan is already running"));
+
+        cancelled.store(true, Ordering::SeqCst);
+        drop(guard);
+
+        assert!(!running.load(Ordering::SeqCst));
+        assert!(!cancelled.load(Ordering::SeqCst));
     }
 
     #[test]

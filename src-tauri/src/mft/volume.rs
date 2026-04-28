@@ -4,7 +4,7 @@ use std::os::windows::ffi::OsStrExt;
 use windows::core::{Result, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, GetDriveTypeW, GetDiskFreeSpaceExW, GetLogicalDriveStringsW,
+    CreateFileW, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDriveStringsW,
     GetVolumeInformationW, FILE_FLAG_OVERLAPPED, FILE_FLAG_SEQUENTIAL_SCAN, FILE_SHARE_READ,
     FILE_SHARE_WRITE, OPEN_EXISTING,
 };
